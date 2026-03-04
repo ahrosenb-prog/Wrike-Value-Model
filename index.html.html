@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Wrike Value Model — Lumeris EPM</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'DM Sans', sans-serif; }
+  input[type="range"] { -webkit-appearance: none; appearance: none; height: 3px; background: #e2e8f0; border-radius: 2px; outline: none; }
+  input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%; background: #3b82f6; cursor: pointer; }
+  input[type="number"] { -moz-appearance: textfield; }
+  input[type="number"]::-webkit-inner-spin-button, input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+</style>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useMemo } = React;
+
+
+const D = {
+  horizon: 3,
+  reportTeamSize: 4, hoursPerCyclePerPerson: 12, reportFrequency: 12, wrikeReduction: 0.75,
+  triageTeamSize: 3, triageHoursPerWeek: 7.5, triageRecapture: 0.85,
+  showRipple: true, downstreamPeople: 15, hoursLostPerIncident: 2, incidentFrequency: 26, rippleRecapture: 0.70,
+  incidentCost: 250000, probCurrent: 0.10, probWrike: 0.02,
+  auditPrepPeople: 3, auditPrepHoursPerCycle: 40, auditPrepCyclesPerYear: 1.5, auditPrepReduction: 0.70,
+  ssAnnualCost: 80000, ssExtras: 41780, ssCredit: 37000, overlapMonths: 4.5,
+  toolConsolidation: 40000, fteAvoided: 1.5,
+  wrikeCostY1: 81000, wrikeProfServices: 15087, wrikeMigration: 20000, wrikeCPU: 540,
+  wrikeLicY1: 150, wrikeLicGrowth: 25,
+  fteCount: 155, fteCost: 100000, headcountGrowth: 0.075, adoptionRamp: 6, discountRate: 0.08,
+};
+
+const fmt = (n) => { const a = Math.abs(Math.round(n)); const s = a.toLocaleString("en-US"); return n < 0 ? `($${s})` : `$${s}`; };
+const fmtK = (n) => { const a = Math.abs(n); if (a >= 1e6) return `$${(n / 1e6).toFixed(1)}M`; if (a >= 1e3) return `$${(n / 1e3).toFixed(0)}K`; return `$${Math.round(n)}`; };
+const pct = (n) => `${(n * 100).toFixed(1)}%`;
+
+function Tip({ text }) {
+  const [show, setShow] = useState(false);
+  return (
+    <span style={{ position: "relative", display: "inline-block", marginLeft: 5, cursor: "pointer" }}
+      onMouseEnter={() => setShow(true)} onMouseLeave={() => setShow(false)} onClick={() => setShow(!show)}>
+      <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 15, height: 15, borderRadius: "50%", background: "#e2e8f0", color: "#475569", fontSize: 9, fontWeight: 700, fontFamily: "'DM Sans',sans-serif" }}>?</span>
+      {show && (
+        <div style={{ position: "absolute", bottom: 22, left: "50%", transform: "translateX(-50%)", width: 240, background: "#1e293b", color: "#f1f5f9", padding: "10px 12px", borderRadius: 8, fontSize: 11, lineHeight: 1.5, zIndex: 999, boxShadow: "0 8px 24px rgba(0,0,0,0.25)", fontFamily: "'DM Sans',sans-serif", fontWeight: 400, pointerEvents: "none" }}>
+          <div style={{ position: "absolute", bottom: -5, left: "50%", transform: "translateX(-50%) rotate(45deg)", width: 10, height: 10, background: "#1e293b" }} />
+          {text}
+        </div>
+      )}
+    </span>
+  );
+}
+
+function Section({ title, color, tip, children, defaultOpen = true }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <button onClick={() => setOpen(!open)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 4, padding: "5px 0", border: "none", background: "none", cursor: "pointer", borderBottom: `2px solid ${color}`, marginBottom: open ? 6 : 0, textAlign: "left" }}>
+        <span style={{ fontSize: 10.5, fontWeight: 700, color, textTransform: "uppercase", letterSpacing: "0.04em", fontFamily: "'DM Sans',sans-serif", flex: 1 }}>{title}</span>
+        {tip && <Tip text={tip} />}
+        <span style={{ fontSize: 9, color: "#94a3b8", transform: open ? "rotate(180deg)" : "rotate(0)", transition: "transform 0.2s", marginLeft: 2 }}>▼</span>
+      </button>
+      {open && <div style={{ paddingTop: 2 }}>{children}</div>}
+    </div>
+  );
+}
+
+function Inp({ label, value, onChange, prefix, suffix, step = 1, min = 0, help }) {
+  return (
+    <div style={{ marginBottom: 7 }}>
+      <div style={{ display: "flex", alignItems: "center", marginBottom: 2 }}>
+        <label style={{ fontSize: 10, fontWeight: 600, color: "#64748b", fontFamily: "'DM Sans',sans-serif", letterSpacing: "0.02em" }}>{label}</label>
+        {help && <Tip text={help} />}
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
+        {prefix && <span style={{ fontSize: 12, color: "#475569", fontWeight: 600 }}>{prefix}</span>}
+        <input type="number" value={value} onChange={e => onChange(Number(e.target.value))} step={step} min={min}
+          style={{ width: "100%", padding: "5px 8px", border: "1px solid #cbd5e1", borderRadius: 5, fontSize: 12, fontFamily: "'JetBrains Mono',monospace", color: "#1e293b", background: "#f8fafc", outline: "none" }}
+          onFocus={e => e.target.style.borderColor = "#3b82f6"} onBlur={e => e.target.style.borderColor = "#cbd5e1"} />
+        {suffix && <span style={{ fontSize: 10, color: "#64748b", whiteSpace: "nowrap" }}>{suffix}</span>}
+      </div>
+    </div>
+  );
+}
+
+function Sld({ label, value, onChange, min, max, step = 1, format = "num", help }) {
+  const d = format === "pct" ? pct(value) : format === "$" ? fmt(value) : value;
+  return (
+    <div style={{ marginBottom: 8 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 2 }}>
+        <div style={{ display: "flex", alignItems: "center" }}>
+          <label style={{ fontSize: 10, fontWeight: 600, color: "#64748b", fontFamily: "'DM Sans',sans-serif" }}>{label}</label>
+          {help && <Tip text={help} />}
+        </div>
+        <span style={{ fontSize: 12, fontWeight: 700, color: "#1e293b", fontFamily: "'JetBrains Mono',monospace" }}>{d}</span>
+      </div>
+      <input type="range" min={min} max={max} step={step} value={value} onChange={e => onChange(Number(e.target.value))}
+        style={{ width: "100%", accentColor: "#3b82f6", height: 3 }} />
+    </div>
+  );
+}
+
+function Toggle({ label, value, onChange, help }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+      <button onClick={() => onChange(!value)} style={{ width: 34, height: 18, borderRadius: 9, border: "none", cursor: "pointer", position: "relative", background: value ? "#3b82f6" : "#cbd5e1", transition: "background 0.2s", flexShrink: 0 }}>
+        <div style={{ width: 14, height: 14, borderRadius: 7, background: "white", position: "absolute", top: 2, left: value ? 18 : 2, transition: "left 0.2s", boxShadow: "0 1px 2px rgba(0,0,0,0.2)" }} />
+      </button>
+      <span style={{ fontSize: 10, fontWeight: 600, color: "#64748b", fontFamily: "'DM Sans',sans-serif" }}>{label}</span>
+      {help && <Tip text={help} />}
+    </div>
+  );
+}
+
+function Stat({ label, value, sub, color = "#1e293b", bg = "#f1f5f9" }) {
+  return (
+    <div style={{ background: bg, borderRadius: 8, padding: "10px 12px", flex: 1, minWidth: 115 }}>
+      <div style={{ fontSize: 9, fontWeight: 700, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 3, fontFamily: "'DM Sans',sans-serif" }}>{label}</div>
+      <div style={{ fontSize: 20, fontWeight: 800, color, fontFamily: "'JetBrains Mono',monospace", lineHeight: 1.1 }}>{value}</div>
+      {sub && <div style={{ fontSize: 9, color: "#94a3b8", marginTop: 2 }}>{sub}</div>}
+    </div>
+  );
+}
+
+function LeverBar({ label, value, maxVal, color, tip }) {
+  const w = maxVal > 0 ? Math.max(3, (value / maxVal) * 100) : 0;
+  return (
+    <div style={{ marginBottom: 7 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 2 }}>
+        <div style={{ display: "flex", alignItems: "center" }}>
+          <span style={{ fontSize: 11, color: "#334155", fontWeight: 500, fontFamily: "'DM Sans',sans-serif" }}>{label}</span>
+          {tip && <Tip text={tip} />}
+        </div>
+        <span style={{ fontSize: 12, fontWeight: 700, color, fontFamily: "'JetBrains Mono',monospace" }}>{fmtK(value)}</span>
+      </div>
+      <div style={{ height: 7, background: "#f1f5f9", borderRadius: 4, overflow: "hidden" }}>
+        <div style={{ height: "100%", width: `${w}%`, background: color, borderRadius: 4, transition: "width 0.4s ease" }} />
+      </div>
+    </div>
+  );
+}
+
+function WrikeValueModel() {
+  const [s, setS] = useState(D);
+  const [tab, setTab] = useState("levers");
+  const u = (k) => (v) => setS(p => ({ ...p, [k]: v }));
+
+  const model = useMemo(() => {
+    const hr = s.fteCost / 2080;
+    const years = [];
+    for (let y = 1; y <= s.horizon; y++) {
+      const af = y === 1 ? Math.max(0, (12 - s.adoptionRamp) / 12) : 1;
+      const ftes = Math.round(s.fteCount * Math.pow(1 + s.headcountGrowth, y - 1));
+      const crh = s.reportTeamSize * s.hoursPerCyclePerPerson * s.reportFrequency;
+      const l1 = crh * hr * s.wrikeReduction * af;
+      const l2a = s.triageTeamSize * s.triageHoursPerWeek * 52 * hr * s.triageRecapture * af;
+      const l2b = s.showRipple ? s.downstreamPeople * s.hoursLostPerIncident * s.incidentFrequency * hr * s.rippleRecapture * af : 0;
+      const l3a = (s.incidentCost * s.probCurrent) - (s.incidentCost * s.probWrike);
+      const l3b = s.auditPrepPeople * s.auditPrepHoursPerCycle * s.auditPrepCyclesPerYear * hr * s.auditPrepReduction * af;
+      const ssAnn = s.ssAnnualCost + s.ssExtras;
+      // Option B: SS savings = only months after migration, no overlap in costs
+      const ssSav = y === 1 ? (ssAnn * (12 - s.overlapMonths) / 12) : ssAnn;
+      const toolSav = y === 1 ? s.toolConsolidation * 0.5 : s.toolConsolidation;
+      const fteSav = y === 1 ? 0 : s.fteAvoided * s.fteCost;
+      const l4 = ssSav + toolSav + fteSav;
+      const wLic = s.wrikeLicY1 + (y - 1) * s.wrikeLicGrowth;
+      const wLicCost = y === 1 ? s.wrikeCostY1 : wLic * s.wrikeCPU;
+      const wProf = y === 1 ? s.wrikeProfServices : 0;
+      const wMig = y === 1 ? s.wrikeMigration : 0;
+      const totalCost = wLicCost + wProf + wMig;
+      const totalBenefit = l1 + l2a + l2b + l3a + l3b + l4;
+      const net = totalBenefit - totalCost;
+      const df = 1 / Math.pow(1 + s.discountRate, y);
+      const coiSS = ssAnn;
+      const coiProductivity = crh * hr + s.triageTeamSize * s.triageHoursPerWeek * 52 * hr + (s.showRipple ? s.downstreamPeople * s.hoursLostPerIncident * s.incidentFrequency * hr : 0);
+      const coiRisk = s.incidentCost * s.probCurrent;
+      const coiAudit = s.auditPrepPeople * s.auditPrepHoursPerCycle * s.auditPrepCyclesPerYear * hr;
+      const coiToolSprawl = s.toolConsolidation;
+      const coiFTE = y > 1 ? s.fteAvoided * s.fteCost : 0;
+      const coiTotal = coiSS + coiProductivity + coiRisk + coiAudit + coiToolSprawl + coiFTE;
+      years.push({ year: y, l1, l2a, l2b, l3a, l3b, l4, totalCost, totalBenefit, net, df, pvNet: net * df, wLic, ftes, ssSav, toolSav, fteSav, wLicCost, wProf, wMig, coiSS, coiProductivity, coiRisk, coiAudit, coiToolSprawl, coiFTE, coiTotal });
+    }
+    const npv = years.reduce((a, y) => a + y.pvNet, 0);
+    const tc = years.reduce((a, y) => a + y.totalCost, 0);
+    const tb = years.reduce((a, y) => a + y.totalBenefit, 0);
+    const roi = tc > 0 ? (tb - tc) / tc : 0;
+    let cum = 0, pbm = null;
+    for (const y of years) { const mn = y.net / 12; for (let m = 1; m <= 12; m++) { cum += mn; if (cum >= 0 && !pbm) pbm = (y.year - 1) * 12 + m; } }
+    const leverTotals = { l1: years.reduce((a, y) => a + y.l1, 0), l2a: years.reduce((a, y) => a + y.l2a, 0), l2b: years.reduce((a, y) => a + y.l2b, 0), l3a: years.reduce((a, y) => a + y.l3a, 0), l3b: years.reduce((a, y) => a + y.l3b, 0), l4: years.reduce((a, y) => a + y.l4, 0) };
+    const coiTotal = years.reduce((a, y) => a + y.coiTotal, 0);
+    return { years, npv, tc, tb, roi, pbm, leverTotals, coiTotal };
+  }, [s]);
+
+  const scenarios = useMemo(() => {
+    const run = (ov) => {
+      const sc = { ...s, ...ov }; const hr = sc.fteCost / 2080;
+      let tC = 0, tB = 0, npvS = 0;
+      for (let y = 1; y <= sc.horizon; y++) {
+        const af = y === 1 ? Math.max(0, (12 - sc.adoptionRamp) / 12) : 1;
+        const crh = sc.reportTeamSize * sc.hoursPerCyclePerPerson * sc.reportFrequency;
+        const a1 = crh * hr * sc.wrikeReduction * af;
+        const a2a = sc.triageTeamSize * sc.triageHoursPerWeek * 52 * hr * sc.triageRecapture * af;
+        const a2b = sc.showRipple ? sc.downstreamPeople * sc.hoursLostPerIncident * sc.incidentFrequency * hr * sc.rippleRecapture * af : 0;
+        const a3a = (sc.incidentCost * sc.probCurrent) - (sc.incidentCost * sc.probWrike);
+        const a3b = sc.auditPrepPeople * sc.auditPrepHoursPerCycle * sc.auditPrepCyclesPerYear * hr * sc.auditPrepReduction * af;
+        const ssA = sc.ssAnnualCost + sc.ssExtras;
+        const ssS = y === 1 ? (ssA * (12 - sc.overlapMonths) / 12) : ssA;
+        const tS = y === 1 ? sc.toolConsolidation * 0.5 : sc.toolConsolidation;
+        const fS = y === 1 ? 0 : sc.fteAvoided * sc.fteCost;
+        const a4 = ssS + tS + fS;
+        const wL = sc.wrikeLicY1 + (y - 1) * sc.wrikeLicGrowth;
+        const wC = y === 1 ? sc.wrikeCostY1 : wL * sc.wrikeCPU;
+        const c = wC + (y === 1 ? sc.wrikeProfServices + sc.wrikeMigration : 0);
+        const b = a1 + a2a + a2b + a3a + a3b + a4;
+        tC += c; tB += b; npvS += (b - c) / Math.pow(1 + sc.discountRate, y);
+      }
+      return { npv: npvS, roi: tC > 0 ? (tB - tC) / tC : 0 };
+    };
+    return [
+      { label: "Base Case", ...run({}), base: true },
+      { label: "Conservative (50% reduction, no ripple)", ...run({ wrikeReduction: 0.50, showRipple: false, triageRecapture: 0.60 }) },
+      { label: "Quarterly reporting only", ...run({ reportFrequency: 4 }) },
+      { label: "Higher incident risk (15% / $400K)", ...run({ probCurrent: 0.15, incidentCost: 400000 }) },
+      { label: "No FTE avoidance", ...run({ fteAvoided: 0 }) },
+      { label: "Aggressive (85% + full ripple)", ...run({ wrikeReduction: 0.85, triageRecapture: 0.95, showRipple: true, downstreamPeople: 25 }) },
+    ];
+  }, [s]);
+
+  const levers = [
+    { key: "l1", label: "Decision Velocity", color: "#8b5cf6", tip: "Time saved by replacing manual cross-functional reporting (Excel/Smartsheet/Tableau fire drills) with real-time Wrike dashboards connected to OKRs." },
+    { key: "l2a", label: "Integration Triage (Expert Capacity)", color: "#06b6d4", tip: "Hours reclaimed from troubleshooting Unito integration failures (404 errors, missing tasks). Currently handled by technical resources like Anna and Sonia who should be focused on clinical enablement." },
+    ...(s.showRipple ? [{ key: "l2b", label: "Integration Ripple (Downstream Impact)", color: "#0891b2", tip: "When an integration breaks, the entire downstream team must manually update/adjust data. This captures the broader team impact beyond the triage team." }] : []),
+    { key: "l3a", label: "Data Cross-Pollination Risk", color: "#f59e0b", tip: "The 'Bob' lever — insurance value of preventing accidental data sharing between customer accounts. Smartsheet's ungoverned usage creates PHI-level risk. Wrike provides centralized access control and immutable audit trails. Source: IBM/Ponemon 2025 ($7.42M avg healthcare breach)." },
+    { key: "l3b", label: "CMS Audit Prep Reduction", color: "#d97706", tip: "Hours saved replacing manual data scrubbing for CMS audits with Wrike's immutable audit trail. Currently requires manually validating data across fragmented systems before each audit cycle." },
+    { key: "l4", label: "Platform Consolidation", color: "#10b981", tip: "Hard-dollar savings: Smartsheet elimination ($122K/yr), tool consolidation (Roadmunk, AHA — $40K/yr), and FTE avoidance from efficiency gains as team grows 5-10% annually." },
+  ];
+  const maxLever = Math.max(...levers.map(l => model.leverTotals[l.key]));
+
+  const tabs = [
+    { id: "levers", label: "Value Levers" },
+    { id: "inaction", label: "Cost of Inaction" },
+    { id: "yearly", label: "Year-by-Year" },
+    { id: "sensitivity", label: "Scenarios" },
+  ];
+
+  return (
+    <div style={{ fontFamily: "'DM Sans',sans-serif", background: "#fff", minHeight: "100vh", color: "#1e293b" }}>
+
+      <div style={{ background: "linear-gradient(135deg,#0f172a 0%,#1e3a5f 50%,#0f4c75 100%)", padding: "20px 24px 14px", color: "white" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ width: 30, height: 30, borderRadius: 6, background: "linear-gradient(135deg,#3b82f6,#06b6d4)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, fontWeight: 800 }}>W</div>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 800, letterSpacing: "-0.02em" }}>Wrike Value Model — Lumeris EPM</div>
+            <div style={{ fontSize: 10, color: "#94a3b8" }}>Capital Committee Business Case • {s.horizon}-Year Projection • Hover <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 13, height: 13, borderRadius: "50%", background: "rgba(255,255,255,0.2)", fontSize: 8, fontWeight: 700 }}>?</span> icons for details</div>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 0, minHeight: "calc(100vh - 64px)" }}>
+        <div style={{ width: 275, minWidth: 275, background: "#f8fafc", borderRight: "1px solid #e2e8f0", padding: "12px 12px", overflowY: "auto", maxHeight: "calc(100vh - 64px)" }}>
+          <Sld label="Time Horizon" value={s.horizon} onChange={u("horizon")} min={1} max={5} help="Drag to model 1 to 5 years. Default is 3 years." />
+
+          <Section title="L1: Decision Velocity" color="#8b5cf6" tip="Measures the time reduction in leadership reporting. Currently a monthly 'fire drill' assembling data from Excel, Smartsheet, and Tableau. Wrike dashboards connected to OKRs eliminate most of this manual assembly.">
+            <Inp label="People in Reporting Cycle" value={s.reportTeamSize} onChange={u("reportTeamSize")} suffix="people" help="How many people are involved in building cross-functional performance reports each cycle." />
+            <Inp label="Hours Per Person Per Cycle" value={s.hoursPerCyclePerPerson} onChange={u("hoursPerCyclePerPerson")} suffix="hrs" help="Hours EACH person spends per reporting cycle. If 4 people each spend 12 hours on a monthly report, that's 48 total hours per month, or 576 hours per year." />
+            <Sld label="Reporting Cycles / Year" value={s.reportFrequency} onChange={u("reportFrequency")} min={1} max={12} help="12 = monthly reports, 4 = quarterly. Change this to see how frequency impacts ROI." />
+            <Sld label="% Reduction with Wrike" value={s.wrikeReduction} onChange={u("wrikeReduction")} min={0.1} max={0.95} step={0.05} format="pct" help="How much of this manual reporting time Wrike eliminates through real-time dashboards and OKR tracking." />
+          </Section>
+
+          <Section title="L2a: Integration Triage" color="#06b6d4" tip="Reclaimed hours from troubleshooting Unito integration failures — the 404 errors, missing tasks, and finger-pointing between support teams that Anna, Sonia, and others deal with weekly." defaultOpen={false}>
+            <Inp label="Triage Team Size" value={s.triageTeamSize} onChange={u("triageTeamSize")} suffix="people" help="People directly involved in diagnosing and fixing integration failures when Unito breaks." />
+            <Sld label="Hours / Week / Person" value={s.triageHoursPerWeek} onChange={u("triageHoursPerWeek")} min={1} max={20} step={0.5} help="Weekly hours each triage person spends on Unito errors, manual syncing, and workarounds." />
+            <Sld label="Recapture Rate" value={s.triageRecapture} onChange={u("triageRecapture")} min={0.1} max={1} step={0.05} format="pct" help="% of troubleshooting time eliminated by replacing Unito with Wrike Integrate and Blueprints." />
+          </Section>
+
+          <Section title="L2b: Integration Ripple" color="#0891b2" tip="When integrations break, the triage team isn't the only one affected — downstream team members across all 11 departments must manually update and adjust their data until it's fixed." defaultOpen={false}>
+            <Toggle label="Include Ripple Effect" value={s.showRipple} onChange={u("showRipple")} help="Toggle ON to show broader team impact. Toggle OFF for a conservative estimate using triage costs only." />
+            {s.showRipple && <>
+              <Inp label="Downstream People Affected" value={s.downstreamPeople} onChange={u("downstreamPeople")} suffix="people" help="How many people beyond the triage team are impacted when an integration breaks?" />
+              <Inp label="Hours Lost / Person / Incident" value={s.hoursLostPerIncident} onChange={u("hoursLostPerIncident")} suffix="hrs" step={0.5} help="Time each downstream person loses per incident to rework, verify, and manually update records." />
+              <Inp label="Incidents / Year" value={s.incidentFrequency} onChange={u("incidentFrequency")} help="52 = weekly, 26 = bi-weekly, 12 = monthly. How often do integrations break?" />
+              <Sld label="Recapture Rate" value={s.rippleRecapture} onChange={u("rippleRecapture")} min={0.1} max={1} step={0.05} format="pct" />
+            </>}
+          </Section>
+
+          <Section title="L3a: Data Cross-Pollination" color="#f59e0b" tip="The 'Bob' lever — preventing accidental sharing of customer data across accounts. In healthcare, ungoverned Smartsheet usage is a compliance liability. Wrike provides centralized access control and an immutable audit trail." defaultOpen={false}>
+            <Inp label="Cost Per Incident" value={s.incidentCost} onChange={u("incidentCost")} prefix="$" help="Estimated cost of a single data governance incident. IBM 2025: $7.42M avg healthcare breach. We use $250K for a mid-size compliance incident (investigation + remediation + corrective action)." />
+            <Sld label="Probability Today" value={s.probCurrent} onChange={u("probCurrent")} min={0.01} max={0.3} step={0.01} format="pct" help="Annual likelihood of an incident under current 'organic and varied' Smartsheet usage." />
+            <Sld label="Probability with Wrike" value={s.probWrike} onChange={u("probWrike")} min={0} max={0.15} step={0.01} format="pct" help="Reduced likelihood with workspace isolation, role-based access, and audit trails." />
+          </Section>
+
+          <Section title="L3b: CMS Audit Prep" color="#d97706" tip="Hours saved replacing manual data scrubbing and validation for CMS audits with Wrike's immutable audit trail. Currently requires assembling compliance evidence from fragmented, ungoverned systems." defaultOpen={false}>
+            <Inp label="Audit Prep Team" value={s.auditPrepPeople} onChange={u("auditPrepPeople")} suffix="people" help="People involved in data scrubbing and validation before CMS audits." />
+            <Inp label="Hours / Cycle / Person" value={s.auditPrepHoursPerCycle} onChange={u("auditPrepHoursPerCycle")} suffix="hrs" help="Hours EACH person spends per audit cycle preparing and validating data." />
+            <Sld label="Audit Cycles / Year" value={s.auditPrepCyclesPerYear} onChange={u("auditPrepCyclesPerYear")} min={1} max={4} step={0.5} help="CMS audits 1-2x per year. Use 1.5 as a midpoint." />
+            <Sld label="Reduction with Wrike" value={s.auditPrepReduction} onChange={u("auditPrepReduction")} min={0.1} max={0.95} step={0.05} format="pct" />
+          </Section>
+
+          <Section title="L4: Platform Savings" color="#10b981" tip="Hard-dollar savings from eliminating Smartsheet ($122K/yr), consolidating tools like Roadmunk and AHA ($40K/yr), and avoiding new hires as the team grows 5-10% annually." defaultOpen={false}>
+            <Inp label="SS Annual License" value={s.ssAnnualCost} onChange={u("ssAnnualCost")} prefix="$" />
+            <Inp label="SS Extras" value={s.ssExtras} onChange={u("ssExtras")} prefix="$" help="Premium App Pack + Event Reporting + Dynamic View" />
+            <Sld label="Overlap Months" value={s.overlapMonths} onChange={u("overlapMonths")} min={0} max={12} step={0.5} help="Months running both platforms during migration. Y1 Smartsheet savings are only counted for the months AFTER migration completes." />
+            <Inp label="Tool Consolidation" value={s.toolConsolidation} onChange={u("toolConsolidation")} prefix="$" suffix="/yr" />
+            <Inp label="FTEs Avoided / Year" value={s.fteAvoided} onChange={u("fteAvoided")} step={0.5} suffix="FTEs" help="Hires you won't need because Wrike makes the existing team more efficient as you scale." />
+          </Section>
+
+          <Section title="Wrike Investment" color="#3b82f6" tip="Total Wrike costs: licensing, professional services, and one-time migration." defaultOpen={false}>
+            <Inp label="Y1 License Cost" value={s.wrikeCostY1} onChange={u("wrikeCostY1")} prefix="$" />
+            <Inp label="Prof Services" value={s.wrikeProfServices} onChange={u("wrikeProfServices")} prefix="$" />
+            <Inp label="Migration Fee" value={s.wrikeMigration} onChange={u("wrikeMigration")} prefix="$" help="Placeholder — TBA from Wrike." />
+            <Inp label="Cost Per User (annual)" value={s.wrikeCPU} onChange={u("wrikeCPU")} prefix="$" help="$81K / 150 users = $540/user/year. Used to project Y2+ costs." />
+            <Inp label="Y1 Licenses" value={s.wrikeLicY1} onChange={u("wrikeLicY1")} />
+            <Inp label="Growth / Year" value={s.wrikeLicGrowth} onChange={u("wrikeLicGrowth")} suffix="seats" />
+          </Section>
+
+          <Section title="Shared Assumptions" color="#475569" defaultOpen={false}>
+            <Inp label="FTEs in Scope" value={s.fteCount} onChange={u("fteCount")} help="Total people across the 11 PM departments." />
+            <Inp label="Fully-Loaded Cost" value={s.fteCost} onChange={u("fteCost")} prefix="$" suffix="/yr" help="Salary + benefits + overhead = ~$48/hr." />
+            <Sld label="Headcount Growth" value={s.headcountGrowth} onChange={u("headcountGrowth")} min={0} max={0.2} step={0.005} format="pct" />
+            <Sld label="Adoption Ramp" value={s.adoptionRamp} onChange={u("adoptionRamp")} min={1} max={12} help="Months before full Wrike adoption. Y1 benefits are prorated." />
+            <Sld label="Discount Rate" value={s.discountRate} onChange={u("discountRate")} min={0.03} max={0.15} step={0.005} format="pct" help="For NPV. 8% = standard corporate cost of capital." />
+          </Section>
+        </div>
+
+        <div style={{ flex: 1, padding: "16px 22px", overflowY: "auto", maxHeight: "calc(100vh - 64px)" }}>
+          <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
+            <Stat label="NPV" value={fmtK(model.npv)} color={model.npv >= 0 ? "#059669" : "#dc2626"} bg={model.npv >= 0 ? "#ecfdf5" : "#fef2f2"} sub={`${s.horizon}yr @ ${pct(s.discountRate)}`} />
+            <Stat label="Total ROI" value={pct(model.roi)} color={model.roi >= 0 ? "#059669" : "#dc2626"} bg="#f0f9ff" sub={`${fmtK(model.tb)} benefit`} />
+            <Stat label="Payback" value={model.pbm ? `${model.pbm}mo` : "N/A"} color="#1e293b" bg="#f5f3ff" sub={model.pbm ? `~${(model.pbm / 12).toFixed(1)} years` : ""} />
+            <Stat label="Cost of Inaction" value={fmtK(model.coiTotal)} color="#dc2626" bg="#fef2f2" sub={`${s.horizon}yr do-nothing cost`} />
+          </div>
+
+          <div style={{ display: "flex", gap: 2, marginBottom: 14, background: "#f1f5f9", borderRadius: 6, padding: 2 }}>
+            {tabs.map(t => (
+              <button key={t.id} onClick={() => setTab(t.id)} style={{ flex: 1, padding: "6px 10px", borderRadius: 4, border: "none", cursor: "pointer", fontSize: 11, fontWeight: 600, fontFamily: "'DM Sans',sans-serif", background: tab === t.id ? "white" : "transparent", color: tab === t.id ? "#1e293b" : "#64748b", boxShadow: tab === t.id ? "0 1px 2px rgba(0,0,0,0.08)" : "none" }}>
+                {t.label}
+              </button>
+            ))}
+          </div>
+
+          {tab === "levers" && (
+            <>
+              <div style={{ background: "#f8fafc", borderRadius: 8, padding: "14px 16px", border: "1px solid #e2e8f0", marginBottom: 14 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 10 }}>{s.horizon}-Year Value by Lever <span style={{ fontWeight: 400, fontSize: 10, color: "#94a3b8" }}>— hover ? for details</span></div>
+                {levers.map(l => <LeverBar key={l.key} label={l.label} value={model.leverTotals[l.key]} maxVal={maxLever} color={l.color} tip={l.tip} />)}
+              </div>
+              <div style={{ background: "#f8fafc", borderRadius: 8, padding: "14px 16px", border: "1px solid #e2e8f0" }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 10 }}>Annual Net Benefit</div>
+                <div style={{ display: "flex", gap: 6 }}>
+                  {model.years.map(y => {
+                    const mx = Math.max(...model.years.map(yr => Math.abs(yr.net)));
+                    const h = Math.max(8, (Math.abs(y.net) / mx) * 90);
+                    const pos = y.net >= 0;
+                    return (
+                      <div key={y.year} style={{ flex: 1, textAlign: "center" }}>
+                        <div style={{ fontSize: 11, fontWeight: 700, color: "#334155", marginBottom: 4 }}>Y{y.year}</div>
+                        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", height: 110, justifyContent: "flex-end" }}>
+                          <div style={{ fontSize: 11, fontWeight: 700, color: pos ? "#059669" : "#dc2626", marginBottom: 3, fontFamily: "'JetBrains Mono',monospace" }}>{fmtK(y.net)}</div>
+                          <div style={{ width: "60%", height: h, borderRadius: "4px 4px 0 0", background: pos ? "linear-gradient(180deg,#10b981,#059669)" : "linear-gradient(180deg,#f87171,#dc2626)", transition: "height 0.3s" }} />
+                        </div>
+                        <div style={{ marginTop: 4, fontSize: 9, color: "#94a3b8" }}>
+                          <div>Cost: <span style={{ color: "#dc2626", fontFamily: "'JetBrains Mono',monospace" }}>{fmtK(y.totalCost)}</span></div>
+                          <div>Benefit: <span style={{ color: "#059669", fontFamily: "'JetBrains Mono',monospace" }}>{fmtK(y.totalBenefit)}</span></div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </>
+          )}
+
+          {tab === "inaction" && (
+            <>
+              <div style={{ background: "#fef2f2", borderRadius: 8, padding: 14, marginBottom: 14, border: "1px solid #fecaca" }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "#991b1b", marginBottom: 4 }}>What happens if Lumeris does nothing?</div>
+                <div style={{ fontSize: 11, color: "#7f1d1d", lineHeight: 1.6 }}>
+                  This view shows the annual cost of maintaining the status quo — fragmented Smartsheet usage, manual reporting fire drills, Unito integration failures, ungoverned data sharing across customer accounts, and manual CMS audit prep. These costs compound as headcount grows {pct(s.headcountGrowth)} annually.
+                </div>
+              </div>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+                <thead>
+                  <tr style={{ background: "#fef2f2" }}>
+                    <th style={{ padding: "8px 10px", textAlign: "left", fontWeight: 700, color: "#991b1b", borderBottom: "2px solid #fecaca", fontSize: 10 }}>Annual Cost of Doing Nothing</th>
+                    {model.years.map(y => <th key={y.year} style={{ padding: "8px 10px", textAlign: "right", fontWeight: 700, color: "#991b1b", borderBottom: "2px solid #fecaca", fontSize: 10 }}>Year {y.year}</th>)}
+                    <th style={{ padding: "8px 10px", textAlign: "right", fontWeight: 700, color: "#991b1b", borderBottom: "2px solid #fecaca", fontSize: 10 }}>Total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[
+                    { l: "Smartsheet Licenses & Add-ons", k: "coiSS" },
+                    { l: "Wasted Productivity (reporting + triage + ripple)", k: "coiProductivity" },
+                    { l: "Data Cross-Pollination Risk (expected annual cost)", k: "coiRisk" },
+                    { l: "Manual CMS Audit Prep", k: "coiAudit" },
+                    { l: "Tool Sprawl (Roadmunk, AHA, etc.)", k: "coiToolSprawl" },
+                    { l: "Additional FTEs for Growth", k: "coiFTE" },
+                    { l: "TOTAL COST OF INACTION", k: "coiTotal", b: true },
+                  ].map((row, i) => {
+                    const total = model.years.reduce((a, y) => a + y[row.k], 0);
+                    return (
+                      <tr key={i} style={{ background: row.b ? "#fef2f2" : "transparent" }}>
+                        <td style={{ padding: "5px 10px", fontWeight: row.b ? 700 : 400, color: row.b ? "#991b1b" : "#334155", borderBottom: "1px solid #f1f5f9" }}>{row.l}</td>
+                        {model.years.map(y => (
+                          <td key={y.year} style={{ padding: "5px 10px", textAlign: "right", fontFamily: "'JetBrains Mono',monospace", fontSize: 11, fontWeight: row.b ? 700 : 400, borderBottom: "1px solid #f1f5f9", color: "#dc2626" }}>{fmt(y[row.k])}</td>
+                        ))}
+                        <td style={{ padding: "5px 10px", textAlign: "right", fontFamily: "'JetBrains Mono',monospace", fontSize: 11, fontWeight: 700, borderBottom: "1px solid #f1f5f9", borderLeft: "2px solid #fecaca", color: "#991b1b" }}>{fmt(total)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              <div style={{ marginTop: 14, background: "#f8fafc", borderRadius: 8, padding: 14, border: "1px solid #e2e8f0" }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 4 }}>The Bottom Line</div>
+                <div style={{ fontSize: 12, color: "#475569", lineHeight: 1.6 }}>
+                  Doing nothing costs Lumeris <span style={{ fontWeight: 700, color: "#dc2626" }}>{fmtK(model.coiTotal)}</span> over {s.horizon} years. The Wrike investment of <span style={{ fontWeight: 700, color: "#3b82f6" }}>{fmtK(model.tc)}</span> eliminates the majority of these costs while delivering <span style={{ fontWeight: 700, color: "#059669" }}>{fmtK(model.tb - model.tc)}</span> in net value.
+                </div>
+              </div>
+            </>
+          )}
+
+          {tab === "yearly" && (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+                <thead>
+                  <tr style={{ background: "#f1f5f9" }}>
+                    <th style={{ padding: "7px 10px", textAlign: "left", fontWeight: 700, color: "#475569", borderBottom: "2px solid #cbd5e1", fontSize: 10 }}>Category</th>
+                    {model.years.map(y => <th key={y.year} style={{ padding: "7px 10px", textAlign: "right", fontWeight: 700, color: "#475569", borderBottom: "2px solid #cbd5e1", fontSize: 10 }}>Year {y.year}</th>)}
+                    <th style={{ padding: "7px 10px", textAlign: "right", fontWeight: 700, color: "#475569", borderBottom: "2px solid #cbd5e1", fontSize: 10 }}>Total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[
+                    { h: "COSTS", hc: "#dc2626" },
+                    { l: "Wrike Licenses", k: "wLicCost", c: true },
+                    { l: "Prof Services", k: "wProf", c: true },
+                    { l: "Migration", k: "wMig", c: true },
+                    { l: "Total Cost", k: "totalCost", c: true, b: true },
+                    { h: "BENEFITS", hc: "#059669" },
+                    { l: "L1: Decision Velocity", k: "l1" },
+                    { l: "L2a: Integration Triage", k: "l2a" },
+                    ...(s.showRipple ? [{ l: "L2b: Integration Ripple", k: "l2b" }] : []),
+                    { l: "L3a: Data Cross-Pollination Risk", k: "l3a" },
+                    { l: "L3b: CMS Audit Prep", k: "l3b" },
+                    { l: "L4: Platform Savings", k: "l4" },
+                    { l: "Total Benefit", k: "totalBenefit", b: true },
+                    { h: "NET", hc: "#1e3a5f" },
+                    { l: "Net Benefit", k: "net", b: true, n: true },
+                    { l: "PV of Net Benefit", k: "pvNet", n: true },
+                  ].map((row, i) => {
+                    if (row.h) return <tr key={i}><td colSpan={model.years.length + 2} style={{ padding: "8px 10px 3px", fontWeight: 800, fontSize: 9, color: row.hc, textTransform: "uppercase", letterSpacing: "0.05em", borderBottom: "1px solid #e2e8f0" }}>{row.h}</td></tr>;
+                    const total = model.years.reduce((a, y) => a + y[row.k], 0);
+                    return (
+                      <tr key={i} style={{ background: row.b ? "#f8fafc" : "transparent" }}>
+                        <td style={{ padding: "4px 10px", fontWeight: row.b ? 700 : 400, color: "#334155", borderBottom: "1px solid #f1f5f9", fontSize: 10 }}>{row.l}</td>
+                        {model.years.map(y => (
+                          <td key={y.year} style={{ padding: "4px 10px", textAlign: "right", fontFamily: "'JetBrains Mono',monospace", fontSize: 10, fontWeight: row.b ? 700 : 400, borderBottom: "1px solid #f1f5f9", color: row.n ? (y[row.k] >= 0 ? "#059669" : "#dc2626") : row.c ? "#dc2626" : "#334155" }}>{fmt(y[row.k])}</td>
+                        ))}
+                        <td style={{ padding: "4px 10px", textAlign: "right", fontFamily: "'JetBrains Mono',monospace", fontSize: 10, fontWeight: 700, borderBottom: "1px solid #f1f5f9", borderLeft: "2px solid #e2e8f0", color: row.n ? (total >= 0 ? "#059669" : "#dc2626") : row.c ? "#dc2626" : "#334155" }}>{fmt(total)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {tab === "sensitivity" && (
+            <>
+              <div style={{ background: "#fffbeb", borderRadius: 6, padding: 10, marginBottom: 12, border: "1px solid #fcd34d", fontSize: 11, color: "#92400e", lineHeight: 1.5 }}>
+                Each scenario stress-tests different assumptions. Use during the committee presentation to show the investment holds up even under conservative conditions.
+              </div>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr style={{ background: "#f1f5f9" }}>
+                    <th style={{ padding: "7px 10px", textAlign: "left", fontWeight: 700, color: "#475569", borderBottom: "2px solid #cbd5e1", fontSize: 10 }}>Scenario</th>
+                    <th style={{ padding: "7px 10px", textAlign: "right", fontWeight: 700, color: "#475569", borderBottom: "2px solid #cbd5e1", fontSize: 10 }}>NPV</th>
+                    <th style={{ padding: "7px 10px", textAlign: "right", fontWeight: 700, color: "#475569", borderBottom: "2px solid #cbd5e1", fontSize: 10 }}>ROI</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {scenarios.map((sc, i) => (
+                    <tr key={i} style={{ background: sc.base ? "#f0f9ff" : "transparent" }}>
+                      <td style={{ padding: "5px 10px", fontSize: 11, fontWeight: sc.base ? 700 : 400, color: "#334155", borderBottom: "1px solid #e2e8f0" }}>{sc.label}</td>
+                      <td style={{ padding: "5px 10px", fontSize: 11, fontWeight: 700, color: sc.npv >= 0 ? "#059669" : "#dc2626", fontFamily: "'JetBrains Mono',monospace", textAlign: "right", borderBottom: "1px solid #e2e8f0" }}>{fmt(sc.npv)}</td>
+                      <td style={{ padding: "5px 10px", fontSize: 11, fontWeight: 600, color: sc.roi >= 0 ? "#059669" : "#dc2626", fontFamily: "'JetBrains Mono',monospace", textAlign: "right", borderBottom: "1px solid #e2e8f0" }}>{pct(sc.roi)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div style={{ marginTop: 14, background: "#f8fafc", borderRadius: 7, padding: 12, border: "1px solid #e2e8f0" }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "#334155", marginBottom: 4 }}>Committee Talking Point</div>
+                <div style={{ fontSize: 11, color: "#475569", lineHeight: 1.6 }}>
+                  {scenarios[1].npv > 0
+                    ? `Even under the most conservative scenario (50% reduction, no ripple effect), the investment delivers a positive NPV of ${fmt(scenarios[1].npv)} with ROI of ${pct(scenarios[1].roi)}. Downside is protected by the SaaS subscription model — no fixed capital at risk.`
+                    : `Conservative scenario shows NPV of ${fmt(scenarios[1].npv)}. Recommend validating assumptions with department leads before presenting.`}
+                </div>
+              </div>
+            </>
+          )}
+
+          <div style={{ marginTop: 16, background: "#f0f9ff", borderRadius: 7, padding: 12, border: "1px solid #bae6fd" }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: "#0369a1", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.03em" }}>Post-Implementation KPIs</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, fontSize: 10, color: "#334155" }}>
+              <div>• % reduction in manual data validation</div>
+              <div>• Reporting cycle time (days)</div>
+              <div>• Integration incidents / month</div>
+              <div>• Audit prep hours / cycle</div>
+              <div>• OKR visibility score (survey)</div>
+              <div>• Smartsheet licenses → 0</div>
+            </div>
+          </div>
+          <div style={{ marginTop: 10, fontSize: 8, color: "#94a3b8", lineHeight: 1.5, borderTop: "1px solid #e2e8f0", paddingTop: 8 }}>
+            <strong>Sources:</strong> IBM/Ponemon Cost of a Data Breach 2025 (hipaajournal.com) • HHS OCR Resolution Agreements (hhs.gov) • HIPAA Penalty Tiers 2025 (accountablehq.com)
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(WrikeValueModel));
+</script>
+</body>
+</html>
