@@ -189,7 +189,7 @@ function exportCSV(model, drivers, g, scenarios, scenarioResults) {
   
   /* SUMMARY SHEET */
   const sum=[
-    ["WRIKE VALUE MODEL"+(g.customerName?" \u2014 "+g.customerName:"")],
+    ["WRIKE VALUE MODEL"+(g.customerName?" — "+g.customerName:"")],
     [],
     ["KEY METRICS","",""],
     [g.discountEnabled?"Net Present Value":"Net Value","",$(model.npv)],
@@ -572,8 +572,8 @@ function App(){
       <div style={{background:"linear-gradient(135deg,#0f172a 0%,#1e3a5f 50%,#0f4c75 100%)",padding:"18px 24px 12px",color:"white",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
         <div style={{display:"flex",alignItems:"center",gap:10}}>
           <div style={{width:30,height:30,borderRadius:6,background:"linear-gradient(135deg,#3b82f6,#06b6d4)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,fontWeight:800}}>W</div>
-          <div><div style={{fontSize:16,fontWeight:800,letterSpacing:"-0.02em"}}>Wrike Value Model{g.customerName?` \u2014 ${g.customerName}`:""}</div>
-            <div style={{fontSize:10,color:"#94a3b8"}}>{g.horizon}-Year Projection{editMode?" \u2022 CONFIGURE MODE":""}</div></div>
+          <div><div style={{fontSize:16,fontWeight:800,letterSpacing:"-0.02em"}}>Wrike Value Model{g.customerName?` — ${g.customerName}`:""}</div>
+            <div style={{fontSize:10,color:"#94a3b8"}}>{g.horizon}-Year Projection{editMode?" • CONFIGURE MODE":""}</div></div>
         </div>
         <div style={{display:"flex",gap:6}}>
           <button onClick={()=>{const url=generateShareURL(drivers,g,kpis,removedKpis);if(url){setShareURL(url);setShareModal(true);}}} style={{padding:"6px 14px",borderRadius:6,border:"1px solid rgba(255,255,255,0.3)",background:"rgba(16,185,129,0.3)",color:"white",cursor:"pointer",fontSize:11,fontWeight:600}}>{"\uD83D\uDD17"} Share</button>
@@ -585,10 +585,10 @@ function App(){
       <div style={{display:"flex",gap:0,minHeight:"calc(100vh - 60px)"}}>
         {/* LEFT */}
         {panelOpen&&<div style={{width:280,minWidth:280,background:"#f8fafc",borderRight:"1px solid #e2e8f0",padding:"12px",overflowY:"auto",maxHeight:"calc(100vh - 60px)"}}>
-          <Inp label="Customer Name" value={g.customerName} onChange={ug("customerName")} placeholder="Enter customer name\u2026"/>
+          <Inp label="Customer Name" value={g.customerName} onChange={ug("customerName")} placeholder="Enter customer name…"/>
           <Sld label="Time Horizon" value={g.horizon} onChange={ug("horizon")} min={1} max={5} help="Model 1 to 5 years."/>
           {editMode&&<div style={{background:"#eff6ff",borderRadius:6,padding:"8px 10px",marginBottom:10,border:"1px solid #bfdbfe",fontSize:10,color:"#1e40af",lineHeight:1.5}}>
-            <strong>Configure Mode:</strong> Toggle drivers, click \u270E to edit name/formula. Click + to add from library.</div>}
+            <strong>Configure Mode:</strong> Toggle drivers on/off, click the pencil icon to edit name or formula. Click + to add from the driver library.</div>}
           {drivers.length===0&&!editMode&&(<div style={{textAlign:"center",padding:"24px 12px"}}>
             <div style={{fontSize:32,marginBottom:8}}>{"\uD83C\uDFAF"}</div>
             <div style={{fontSize:13,fontWeight:700,color:"#334155",marginBottom:4}}>No Value Drivers Selected</div>
@@ -611,7 +611,7 @@ function App(){
           <div style={{marginBottom:8}}>
             <button onClick={()=>ts("_l4")} style={{width:"100%",display:"flex",alignItems:"center",padding:"5px 0",border:"none",background:"none",cursor:"pointer",borderBottom:"2px solid #10b981",marginBottom:openSections._l4?6:0,textAlign:"left"}}>
               <span style={{fontSize:10.5,fontWeight:700,color:"#10b981",textTransform:"uppercase",letterSpacing:"0.04em",flex:1}}>Legacy Tool(s) Consolidation</span>
-              <Tip text="Enter the total annual cost of ALL tools being replaced or reduced each year \u2014 primary platform, add-ons, point solutions, everything. As departments migrate to Wrike, costs should decrease."/><span style={{fontSize:9,color:"#94a3b8",transform:openSections._l4?"rotate(180deg)":"rotate(0)",transition:"transform 0.2s",marginLeft:4}}>{"\u25BC"}</span></button>
+              <Tip text="Enter the total annual cost of ALL tools being replaced or reduced each year — primary platform, add-ons, point solutions, everything. As departments migrate to Wrike, costs should decrease."/><span style={{fontSize:9,color:"#94a3b8",transform:openSections._l4?"rotate(180deg)":"rotate(0)",transition:"transform 0.2s",marginLeft:4}}>{"\u25BC"}</span></button>
             {openSections._l4&&(<>
               {Array.from({length:g.horizon},(_,i)=>(<Inp key={i} label={`Year ${i+1} Legacy Tool(s) Cost`} value={g.legacyCostByYear[i]||0} onChange={v=>setLegacyCost(i,v)} prefix="$" help={i===0?"Total cost of ALL legacy tools in Year 1 (full cost during migration).":"Reduced cost as departments migrate off legacy tools."}/>))}
               <Inp label="FTEs Avoided / Year" value={g.fteAvoided} onChange={ug("fteAvoided")} step={0.5} suffix="FTEs" help="Hires avoided because Wrike absorbs workload growth."/>
@@ -619,7 +619,7 @@ function App(){
                 <button onClick={()=>setG(p=>({...p,fteAvoidY1:!p.fteAvoidY1}))} style={{width:34,height:18,borderRadius:9,border:"none",cursor:"pointer",position:"relative",background:g.fteAvoidY1?"#3b82f6":"#cbd5e1",transition:"background 0.2s",flexShrink:0}}>
                   <div style={{width:14,height:14,borderRadius:7,background:"white",position:"absolute",top:2,left:g.fteAvoidY1?18:2,transition:"left 0.2s",boxShadow:"0 1px 2px rgba(0,0,0,0.2)"}}/></button>
                 <span style={{fontSize:10,fontWeight:600,color:"#64748b"}}>Include Y1 FTE avoidance</span>
-                <Tip text="When ON, Y1 FTE savings prorated by adoption ramp. Default OFF \u2014 savings start Y2."/></div>
+                <Tip text="When ON, Y1 FTE savings prorated by adoption ramp. Default OFF — savings start Y2."/></div>
             </>)}
           </div>
           {/* WRIKE INVESTMENT - per year costs */}
@@ -628,7 +628,7 @@ function App(){
               <span style={{fontSize:10.5,fontWeight:700,color:"#3b82f6",textTransform:"uppercase",letterSpacing:"0.04em",flex:1}}>Wrike Investment</span>
               <span style={{fontSize:9,color:"#94a3b8",transform:openSections._wrike?"rotate(180deg)":"rotate(0)",transition:"transform 0.2s",marginLeft:4}}>{"\u25BC"}</span></button>
             {openSections._wrike&&(<>
-              <div style={{fontSize:10,fontWeight:600,color:"#3b82f6",marginBottom:4}}>Annual License Cost <Tip text="Enter the actual Wrike license cost per year from your contract or quote. If flat-rate bundled, enter the total. If per-user, calculate seats \u00D7 rate."/></div>
+              <div style={{fontSize:10,fontWeight:600,color:"#3b82f6",marginBottom:4}}>Annual License Cost <Tip text="Enter the actual Wrike license cost per year from your contract or quote. If flat-rate bundled, enter the total. If per-user, calculate seats × rate."/></div>
               {Array.from({length:g.horizon},(_,i)=>(<Inp key={i} label={`Year ${i+1} Wrike License`} value={g.wrikeCostByYear[i]||0} onChange={v=>setWrikeCost(i,v)} prefix="$"/>))}
               <Inp label="Prof Services" value={g.wrikeProfServices} onChange={ug("wrikeProfServices")} prefix="$" help="One-time professional services (Y1 only)."/>
               <Inp label="Migration Fee" value={g.wrikeMigration} onChange={ug("wrikeMigration")} prefix="$" help="One-time data migration (Y1 only)."/>
@@ -638,7 +638,7 @@ function App(){
                 <span style={{fontSize:11,color:"#475569"}}>$</span>
                 <input type="number" value={sku.annual} onChange={e=>{const a=[...g.wrikeAdditionalSKUs];a[idx]={...a[idx],annual:Number(e.target.value)};setG(p=>({...p,wrikeAdditionalSKUs:a}));}} style={{width:80,padding:"4px 6px",border:"1px solid #cbd5e1",borderRadius:4,fontSize:11,fontFamily:"'JetBrains Mono',monospace",outline:"none"}}/>
                 <span style={{fontSize:9,color:"#94a3b8"}}>/yr</span>
-                <button onClick={()=>{const a=[...g.wrikeAdditionalSKUs];a.splice(idx,1);setG(p=>({...p,wrikeAdditionalSKUs:a}));}} style={{border:"none",background:"none",cursor:"pointer",fontSize:14,color:"#dc2626",padding:"0 2px"}}>{"\u00D7"}</button>
+                <button onClick={()=>{const a=[...g.wrikeAdditionalSKUs];a.splice(idx,1);setG(p=>({...p,wrikeAdditionalSKUs:a}));}} style={{border:"none",background:"none",cursor:"pointer",fontSize:14,color:"#dc2626",padding:"0 2px"}}>{"×"}</button>
               </div>))}
               <button onClick={()=>setG(p=>({...p,wrikeAdditionalSKUs:[...p.wrikeAdditionalSKUs,{name:"",annual:0}]}))} style={{fontSize:10,color:"#3b82f6",background:"none",border:"none",cursor:"pointer",fontWeight:600,padding:"2px 0"}}>+ Add SKU</button>
             </>)}
@@ -650,7 +650,7 @@ function App(){
               <span style={{fontSize:9,color:"#94a3b8",transform:openSections._shared?"rotate(180deg)":"rotate(0)",transition:"transform 0.2s",marginLeft:4}}>{"\u25BC"}</span></button>
             {openSections._shared&&(<>
               <Inp label="Fully-Loaded FTE Cost" value={g.fteCost} onChange={ug("fteCost")} prefix="$" suffix="/yr" help="Salary + benefits + overhead. $100K = ~$48/hr."/>
-              <Sld label="Headcount Growth" value={g.headcountGrowth} onChange={ug("headcountGrowth")} min={0} max={0.2} step={0.005} format="pct" help="Cost of Inaction only \u2014 shows how problems scale."/>
+              <Sld label="Headcount Growth" value={g.headcountGrowth} onChange={ug("headcountGrowth")} min={0} max={0.2} step={0.005} format="pct" help="Cost of Inaction only — shows how problems scale."/>
               <Sld label="Adoption Ramp" value={g.adoptionRamp} onChange={ug("adoptionRamp")} min={1} max={12} help="Months to full adoption. Y1 benefits prorated. 6-9mo typical."/>
               <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:6,marginTop:4}}>
                 <button onClick={()=>setG(p=>({...p,discountEnabled:!p.discountEnabled}))} style={{width:34,height:18,borderRadius:9,border:"none",cursor:"pointer",position:"relative",background:g.discountEnabled?"#3b82f6":"#cbd5e1",transition:"background 0.2s",flexShrink:0}}>
@@ -772,17 +772,17 @@ function App(){
                 {mappedKpis.map((k,i)=>{const isFromDriver=drivers.some(d=>d.enabled&&d.kpis&&d.kpis.includes(k));const isCustom=kpis.includes(k);return(
                   <div key={i} style={{display:"flex",gap:4,alignItems:"center"}}>
                     {isFromDriver&&!isCustom?(<>
-                      <span style={{fontSize:10,color:"#334155",flex:1,padding:"3px 6px",background:"#ecfdf5",borderRadius:4,border:"1px solid #bbf7d0"}}>{"\u2022"} {k} <span style={{fontSize:8,color:"#94a3b8"}}>(auto)</span></span>
-                      <button onClick={()=>setRemovedKpis(p=>({...p,[k]:true}))} style={{border:"none",background:"none",cursor:"pointer",fontSize:12,color:"#dc2626"}}>{"\u00D7"}</button>
+                      <span style={{fontSize:10,color:"#334155",flex:1,padding:"3px 6px",background:"#ecfdf5",borderRadius:4,border:"1px solid #bbf7d0"}}>{"•"} {k} <span style={{fontSize:8,color:"#94a3b8"}}>(auto)</span></span>
+                      <button onClick={()=>setRemovedKpis(p=>({...p,[k]:true}))} style={{border:"none",background:"none",cursor:"pointer",fontSize:12,color:"#dc2626"}}>{"×"}</button>
                     </>):(<>
                       <input value={k} onChange={e=>{const a=[...kpis];const ci=kpis.indexOf(k);if(ci>=0){a[ci]=e.target.value;setKpis(a);}}} style={{flex:1,padding:"3px 6px",border:"1px solid #bae6fd",borderRadius:4,fontSize:10,outline:"none",background:"white"}}/>
-                      <button onClick={()=>setKpis(kpis.filter(x=>x!==k))} style={{border:"none",background:"none",cursor:"pointer",fontSize:12,color:"#dc2626"}}>{"\u00D7"}</button>
+                      <button onClick={()=>setKpis(kpis.filter(x=>x!==k))} style={{border:"none",background:"none",cursor:"pointer",fontSize:12,color:"#dc2626"}}>{"×"}</button>
                     </>)}
                   </div>);})}
               </div>
             ):(
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:4,fontSize:10,color:"#334155"}}>
-                {mappedKpis.filter(k=>k).map((k,i)=><div key={i}>{"\u2022"} {k}</div>)}
+                {mappedKpis.filter(k=>k).map((k,i)=><div key={i}>{"•"} {k}</div>)}
               </div>
             )}
           </div>
