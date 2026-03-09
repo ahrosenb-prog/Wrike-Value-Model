@@ -135,12 +135,12 @@ const COLORS = ["#8b5cf6","#06b6d4","#0891b2","#f59e0b","#d97706","#10b981","#ec
 const CAT_COLORS = {"Productivity":"#8b5cf6","Integration & Tool Sprawl":"#06b6d4","Risk & Compliance":"#f59e0b","Quality & Rework":"#ec4899","Revenue & Strategic":"#10b981"};
 
 const DEFAULT_GLOBALS = {
-  customerName:"", horizon:3,
+  customerName:"", currency:"$", horizon:3,
   legacyFullCost:121780,
   legacyPhaseDown:[84800, 21600, 21600, 0, 0],
   fteAvoided:1.5, fteAvoidY1:false,
   wrikeCostByYear:[81000, 94500, 108000, 121500, 135000],
-  wrikeProfServices:15087, wrikeMigration:20000,
+  wrikeProfServices:15087, wrikeMigration:0,
   wrikeAdditionalSKUs:[],
   fteCost:100000, headcountGrowth:0.075, adoptionRamp:6,
   discountEnabled:false, discountRate:0.08,
@@ -157,8 +157,9 @@ const DEFAULT_SCENARIOS = [
     overrides:{leverOverrides:{},globalOverrides:{adoptionRamp:3},leverInputOverrides:{}} },
 ];
 
-const fmt = (n) => { const a=Math.abs(Math.round(n));const s=a.toLocaleString("en-US");return n<0?`($${s})`:`$${s}`; };
-const fmtK = (n) => { const a=Math.abs(n);if(a>=1e6)return`$${(n/1e6).toFixed(1)}M`;if(a>=100000)return`$${(n/1e3).toFixed(0)}K`;if(a>=1e3)return`$${(n/1e3).toFixed(1)}K`;return`$${Math.round(n)}`; };
+let _cur="$";
+const fmt = (n) => { const a=Math.abs(Math.round(n));const s=a.toLocaleString("en-US");return n<0?`(${_cur}${s})`:`${_cur}${s}`; };
+const fmtK = (n) => { const a=Math.abs(n);if(a>=1e6)return`${_cur}${(n/1e6).toFixed(1)}M`;if(a>=100000)return`${_cur}${(n/1e3).toFixed(0)}K`;if(a>=1e3)return`${_cur}${(n/1e3).toFixed(1)}K`;return`${_cur}${Math.round(n)}`; };
 const pct = (n) => `${(n*100).toFixed(1)}%`;
 
 function calcDriver(d, hr, af) {
@@ -184,6 +185,7 @@ function calcCoi(d, hr) {
 
 function exportCSV(model, drivers, g, scenarios, scenarioResults) {
   if(typeof XLSX==="undefined"){alert("Export requires browser.");return;}
+  const CUR=g.currency||"$";const CF=CUR+"#,##0";
   const el=drivers.filter(d=>d.enabled);const hr=g.fteCost/2080;const H=g.horizon;
   const wb=XLSX.utils.book_new();
   
@@ -670,7 +672,6 @@ function App(){
   const[g,setG]=useState(urlConfig?.g ? {...DEFAULT_GLOBALS, ...urlConfig.g} : DEFAULT_GLOBALS);
   const[scenarios,setScenarios]=useState(DEFAULT_SCENARIOS);
   const[tab,setTab]=useState("drivers");
-  const[editMode,setEditMode]=useState(false);
   const[showLibrary,setShowLibrary]=useState(false);
   const[editingDriver,setEditingDriver]=useState(null);
   const[editingScenario,setEditingScenario]=useState(null);
@@ -682,11 +683,50 @@ function App(){
     const m={}; if(urlConfig?.d) urlConfig.d.forEach((d,i)=>m[d.id]=i===0); return m;
   });
   const[shareModal,setShareModal]=useState(false);
+  const[toast,setToast]=useState("");
+  React.useEffect(()=>{if(toast){const t=setTimeout(()=>setToast(""),3000);return()=>clearTimeout(t);}},[toast]);
+  const[showModels,setShowModels]=useState(false);
+  const[savedModels,setSavedModels]=useState(()=>{try{return JSON.parse(localStorage.getItem("wrike_models")||"[]");}catch(e){return[];}});
   const[shareURL,setShareURL]=useState("");
+  _cur=g.currency||"$";
+  const editMode=true;
   const ug=(k)=>(v)=>setG(p=>({...p,[k]:v}));
   const ts=(id)=>setOpenSections(p=>({...p,[id]:!p[id]}));
   const setPhaseDown=(yr,val)=>setG(p=>{const a=[...p.legacyPhaseDown];a[yr]=val;return{...p,legacyPhaseDown:a};});
   const setWrikeCost=(yr,val)=>setG(p=>{const a=[...p.wrikeCostByYear];a[yr]=val;return{...p,wrikeCostByYear:a};});
+
+  const saveModel=()=>{
+    const name=g.customerName||"Untitled Model";
+    const model_data={name,date:new Date().toISOString().split("T")[0],d:drivers,g,k:kpis,r:removedKpis};
+    const existing=savedModels.findIndex(m=>m.name===name);
+    let updated;
+    if(existing>=0){updated=[...savedModels];updated[existing]=model_data;}
+    else{updated=[...savedModels,model_data];}
+    setSavedModels(updated);
+    try{localStorage.setItem("wrike_models",JSON.stringify(updated));}catch(e){}
+  };
+  const loadModel=(m)=>{
+    setDrivers(m.d||[]);setG({...DEFAULT_GLOBALS,...(m.g||{})});setKpis(m.k||[]);setRemovedKpis(m.r||{});
+    const ns={};(m.d||[]).forEach((d,i)=>ns[d.id]=i===0);setOpenSections(ns);
+    setShowModels(false);
+  };
+  const deleteModel=(idx)=>{
+    const updated=savedModels.filter((_,i)=>i!==idx);
+    setSavedModels(updated);
+    try{localStorage.setItem("wrike_models",JSON.stringify(updated));}catch(e){}
+  };
+  const exportJSON=()=>{
+    const data={name:g.customerName||"Model",date:new Date().toISOString().split("T")[0],d:drivers,g,k:kpis,r:removedKpis};
+    const blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
+    const url=URL.createObjectURL(blob);const a=document.createElement("a");
+    a.href=url;a.download=`Wrike_Model_${g.customerName||"export"}.json`;a.click();URL.revokeObjectURL(url);
+  };
+  const importJSON=(e)=>{
+    const file=e.target.files[0];if(!file)return;
+    const reader=new FileReader();
+    reader.onload=(ev)=>{try{const data=JSON.parse(ev.target.result);if(Array.isArray(data)){const updated=[...savedModels,...data];setSavedModels(updated);try{localStorage.setItem("wrike_models",JSON.stringify(updated));}catch(e){}setToast("Imported "+data.length+" models");}else{loadModel(data);}}catch(err){alert("Invalid file");}};
+    reader.readAsText(file);
+  };
 
   /* Auto-map KPIs from active drivers */
   const mappedKpis = useMemo(()=>{
@@ -751,13 +791,12 @@ function App(){
         <div style={{display:"flex",alignItems:"center",gap:10}}>
           <div style={{width:30,height:30,borderRadius:6,background:"linear-gradient(135deg,#3b82f6,#06b6d4)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,fontWeight:800}}>W</div>
           <div><div style={{fontSize:16,fontWeight:800,letterSpacing:"-0.02em"}}>Wrike Value Model{g.customerName?` — ${g.customerName}`:""}</div>
-            <div style={{fontSize:10,color:"#94a3b8"}}>{g.horizon}-Year Projection{editMode?" • CONFIGURE MODE":""}</div></div>
+            <div style={{fontSize:10,color:"#94a3b8"}}>{g.horizon}-Year Projection</div></div>
         </div>
         <div style={{display:"flex",gap:6}}>
-          <button onClick={()=>{const url=generateShareURL(drivers,g,kpis,removedKpis);if(url){setShareURL(url);setShareModal(true);}}} style={{padding:"6px 14px",borderRadius:6,border:"1px solid rgba(255,255,255,0.3)",background:"rgba(16,185,129,0.3)",color:"white",cursor:"pointer",fontSize:11,fontWeight:600}}>{"\uD83D\uDD17"} Share</button>
-          <button onClick={()=>setPanelOpen(p=>!p)} style={{padding:"6px 14px",borderRadius:6,border:"1px solid rgba(255,255,255,0.3)",background:panelOpen?"rgba(255,255,255,0.1)":"rgba(16,185,129,0.4)",color:"white",cursor:"pointer",fontSize:11,fontWeight:600}}>{panelOpen?"\u25C0 Hide Inputs":"\u25B6 Show Inputs"}</button>
-          <button onClick={()=>exportCSV(model,drivers,g,scenarios,scenarioResults)} style={{padding:"6px 14px",borderRadius:6,border:"1px solid rgba(255,255,255,0.3)",background:"rgba(255,255,255,0.1)",color:"white",cursor:"pointer",fontSize:11,fontWeight:600}}>{"\u2913"} Export</button>
-          <button onClick={()=>setEditMode(!editMode)} style={{padding:"6px 14px",borderRadius:6,border:"1px solid rgba(255,255,255,0.3)",background:editMode?"rgba(59,130,246,0.5)":"rgba(255,255,255,0.1)",color:"white",cursor:"pointer",fontSize:11,fontWeight:600}}>{editMode?"\u2713 Done":"\u270E Configure"}</button>
+          <button onClick={()=>setShowModels(true)} style={{padding:"6px 14px",borderRadius:6,border:"1px solid rgba(255,255,255,0.3)",background:"rgba(255,255,255,0.1)",color:"white",cursor:"pointer",fontSize:11,fontWeight:600}}>My Models</button>
+          <button onClick={()=>{saveModel();const url=generateShareURL(drivers,g,kpis,removedKpis);if(url){navigator.clipboard.writeText(url).catch(()=>{});setToast("Saved & link copied!");}else{setToast("Saved!");}}} style={{padding:"6px 14px",borderRadius:6,border:"1px solid rgba(255,255,255,0.3)",background:"rgba(59,130,246,0.4)",color:"white",cursor:"pointer",fontSize:11,fontWeight:600}}>Save & Share</button>
+          <button onClick={()=>exportCSV(model,drivers,g,scenarios,scenarioResults)} style={{padding:"6px 14px",borderRadius:6,border:"1px solid rgba(255,255,255,0.3)",background:"rgba(255,255,255,0.1)",color:"white",cursor:"pointer",fontSize:11,fontWeight:600}}>Export</button>
         </div>
       </div>
       <div style={{display:"flex",gap:0,minHeight:"calc(100vh - 60px)"}}>
@@ -765,9 +804,42 @@ function App(){
         {panelOpen&&<div style={{width:280,minWidth:280,background:"#f8fafc",borderRight:"1px solid #e2e8f0",padding:"12px",overflowY:"auto",maxHeight:"calc(100vh - 60px)"}}>
           <Inp label="Customer Name" value={g.customerName} onChange={ug("customerName")} placeholder="Enter customer name…"/>
           <Sld label="Time Horizon" value={g.horizon} onChange={ug("horizon")} min={1} max={5} help="Model 1 to 5 years."/>
-          {editMode&&<div style={{background:"#eff6ff",borderRadius:6,padding:"8px 10px",marginBottom:10,border:"1px solid #bfdbfe",fontSize:10,color:"#1e40af",lineHeight:1.5}}>
-            <strong>Configure Mode:</strong> Toggle drivers on/off, click the pencil icon to edit name or formula. Click + to add from the driver library.</div>}
-          {drivers.length===0&&!editMode&&(<div style={{textAlign:"center",padding:"24px 12px"}}>
+          {/* SHARED */}
+          <div style={{marginBottom:8}}>
+            <button onClick={()=>ts("_shared")} style={{width:"100%",display:"flex",alignItems:"center",padding:"5px 0",border:"none",background:"none",cursor:"pointer",borderBottom:"2px solid #475569",marginBottom:openSections._shared?6:0,textAlign:"left"}}>
+              <span style={{fontSize:10.5,fontWeight:700,color:"#475569",textTransform:"uppercase",letterSpacing:"0.04em",flex:1}}>Shared Assumptions</span>
+              <span style={{fontSize:9,color:"#94a3b8",transform:openSections._shared?"rotate(180deg)":"rotate(0)",transition:"transform 0.2s",marginLeft:4}}>{"\u25BC"}</span></button>
+            {openSections._shared&&(<>
+              <div style={{marginBottom:6}}>
+                <label style={{fontSize:10,fontWeight:600,color:"#64748b"}}>Currency</label>
+                <select value={g.currency} onChange={e=>setG(p=>({...p,currency:e.target.value}))} style={{width:"100%",padding:"5px 8px",border:"1px solid #cbd5e1",borderRadius:5,fontSize:12,color:"#1e293b",background:"#f8fafc",outline:"none",marginTop:2}}>
+                  <option value="$">$ USD - US Dollar</option>
+                  <option value="€">€ EUR - Euro</option>
+                  <option value="£">£ GBP - British Pound</option>
+                  <option value="¥">¥ JPY/CNY - Yen/Yuan</option>
+                  <option value="A$">A$ AUD - Australian Dollar</option>
+                  <option value="C$">C$ CAD - Canadian Dollar</option>
+                  <option value="CHF ">CHF - Swiss Franc</option>
+                  <option value="kr ">kr SEK/NOK/DKK - Krona/Krone</option>
+                  <option value="R$">R$ BRL - Brazilian Real</option>
+                  <option value="₹">₹ INR - Indian Rupee</option>
+                  <option value="₩">₩ KRW - Korean Won</option>
+                  <option value="S$">S$ SGD - Singapore Dollar</option>
+                </select>
+              </div>
+              <Inp label="Fully-Loaded FTE Cost" value={g.fteCost} onChange={ug("fteCost")} prefix={g.currency} suffix="/yr" help="Salary + benefits + overhead."/>
+              <Sld label="Headcount Growth" value={g.headcountGrowth} onChange={ug("headcountGrowth")} min={0} max={0.2} step={0.005} format="pct" help="Cost of Inaction only — shows how problems scale."/>
+              <Sld label="Adoption Ramp" value={g.adoptionRamp} onChange={ug("adoptionRamp")} min={1} max={12} help="Months to full adoption. Y1 benefits prorated. 6-9mo typical."/>
+              <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:6,marginTop:4}}>
+                <button onClick={()=>setG(p=>({...p,discountEnabled:!p.discountEnabled}))} style={{width:34,height:18,borderRadius:9,border:"none",cursor:"pointer",position:"relative",background:g.discountEnabled?"#3b82f6":"#cbd5e1",transition:"background 0.2s",flexShrink:0}}>
+                  <div style={{width:14,height:14,borderRadius:7,background:"white",position:"absolute",top:2,left:g.discountEnabled?18:2,transition:"left 0.2s",boxShadow:"0 1px 2px rgba(0,0,0,0.2)"}}/></button>
+                <span style={{fontSize:10,fontWeight:600,color:"#64748b"}}>Discount Rate (NPV)</span>
+                <Tip text="Adjusts future savings to today's dollars. 8% standard. Ask finance."/></div>
+              {g.discountEnabled&&<Sld label="Discount Rate" value={g.discountRate} onChange={ug("discountRate")} min={0.03} max={0.15} step={0.005} format="pct"/>}
+            </>)}
+          </div>
+
+          {drivers.length===0&&(<div style={{textAlign:"center",padding:"24px 12px"}}>
             <div style={{fontSize:32,marginBottom:8}}>{"\uD83C\uDFAF"}</div>
             <div style={{fontSize:13,fontWeight:700,color:"#334155",marginBottom:4}}>No Value Drivers Selected</div>
             <div style={{fontSize:11,color:"#64748b",marginBottom:12,lineHeight:1.5}}>Add drivers that match your customer's pain points.</div>
@@ -783,7 +855,7 @@ function App(){
             </div>
             {openSections[driver.id]&&driver.enabled&&<DriverInputs driver={driver} onChange={upd=>setDrivers(p=>p.map(d=>d.id===upd.id?upd:d))}/>}
           </div>))}
-          {(drivers.length>0||editMode)&&(<button onClick={()=>setShowLibrary(true)} style={{width:"100%",padding:"10px",border:"2px dashed #cbd5e1",borderRadius:8,background:"white",cursor:"pointer",fontSize:12,fontWeight:600,color:"#64748b",marginBottom:10,display:"flex",alignItems:"center",justifyContent:"center",gap:6}}>
+          {(drivers.length>0)&&(<button onClick={()=>setShowLibrary(true)} style={{width:"100%",padding:"10px",border:"2px dashed #cbd5e1",borderRadius:8,background:"white",cursor:"pointer",fontSize:12,fontWeight:600,color:"#64748b",marginBottom:10,display:"flex",alignItems:"center",justifyContent:"center",gap:6}}>
             <span style={{fontSize:16,lineHeight:1}}>+</span> Add Value Drivers</button>)}
           {/* LEGACY CONSOLIDATION */}
           <div style={{marginBottom:8}}>
@@ -791,9 +863,9 @@ function App(){
               <span style={{fontSize:10.5,fontWeight:700,color:"#10b981",textTransform:"uppercase",letterSpacing:"0.04em",flex:1}}>Legacy Tool(s) Savings</span>
               <Tip text="Enter the total annual cost of ALL tools being replaced or reduced each year — primary platform, add-ons, point solutions, everything. As departments migrate to Wrike, costs should decrease. Legacy Savings = Current Annual Cost minus Phase-Down Cost. FTE Avoidance is a separate benefit line item."/><span style={{fontSize:9,color:"#94a3b8",transform:openSections._l4?"rotate(180deg)":"rotate(0)",transition:"transform 0.2s",marginLeft:4}}>{"\u25BC"}</span></button>
             {openSections._l4&&(<>
-              <Inp label="Current Annual Cost (do-nothing)" value={g.legacyFullCost} onChange={ug("legacyFullCost")} prefix="$" help="What you pay per year for ALL legacy tools if nothing changes. This is the baseline for Cost of Inaction."/>
+              <Inp label="Current Annual Cost (do-nothing)" value={g.legacyFullCost} onChange={ug("legacyFullCost")} prefix={g.currency} help="What you pay per year for ALL legacy tools if nothing changes. This is the baseline for Cost of Inaction."/>
               <div style={{fontSize:10,fontWeight:600,color:"#10b981",marginTop:4,marginBottom:4}}>Phase-Down Plan with Wrike <Tip text="Enter what you'll actually pay for legacy tools each year as you migrate. The SAVINGS is the difference between your current cost and this phase-down amount."/></div>
-              {Array.from({length:g.horizon},(_,i)=>{const sav=g.legacyFullCost-(g.legacyPhaseDown[i]||0);return(<div key={i}><Inp label={`Year ${i+1} Legacy Cost (with Wrike)`} value={g.legacyPhaseDown[i]||0} onChange={v=>setPhaseDown(i,v)} prefix="$" help={`What you'll still pay in Year ${i+1}. Savings: $${g.legacyFullCost.toLocaleString()} - $${(g.legacyPhaseDown[i]||0).toLocaleString()} = $${Math.max(0,sav).toLocaleString()}`}/></div>);})}
+              {Array.from({length:g.horizon},(_,i)=>{const sav=g.legacyFullCost-(g.legacyPhaseDown[i]||0);return(<div key={i}><Inp label={`Year ${i+1} Legacy Cost (with Wrike)`} value={g.legacyPhaseDown[i]||0} onChange={v=>setPhaseDown(i,v)} prefix={g.currency} help={`What you'll still pay in Year ${i+1}. Savings: $${g.legacyFullCost.toLocaleString()} - $${(g.legacyPhaseDown[i]||0).toLocaleString()} = $${Math.max(0,sav).toLocaleString()}`}/></div>);})}
               <Inp label="FTEs Avoided / Year" value={g.fteAvoided} onChange={ug("fteAvoided")} step={0.5} suffix="FTEs" help="Hires avoided because Wrike absorbs workload growth."/>
               <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:6}}>
                 <button onClick={()=>setG(p=>({...p,fteAvoidY1:!p.fteAvoidY1}))} style={{width:34,height:18,borderRadius:9,border:"none",cursor:"pointer",position:"relative",background:g.fteAvoidY1?"#3b82f6":"#cbd5e1",transition:"background 0.2s",flexShrink:0}}>
@@ -809,13 +881,12 @@ function App(){
               <span style={{fontSize:9,color:"#94a3b8",transform:openSections._wrike?"rotate(180deg)":"rotate(0)",transition:"transform 0.2s",marginLeft:4}}>{"\u25BC"}</span></button>
             {openSections._wrike&&(<>
               <div style={{fontSize:10,fontWeight:600,color:"#3b82f6",marginBottom:4}}>Annual License Cost <Tip text="Enter the actual Wrike license cost per year from your contract or quote. If flat-rate bundled, enter the total. If per-user, calculate seats × rate."/></div>
-              {Array.from({length:g.horizon},(_,i)=>(<Inp key={i} label={`Year ${i+1} Wrike License`} value={g.wrikeCostByYear[i]||0} onChange={v=>setWrikeCost(i,v)} prefix="$"/>))}
-              <Inp label="Prof Services" value={g.wrikeProfServices} onChange={ug("wrikeProfServices")} prefix="$" help="One-time professional services (Y1 only)."/>
-              <Inp label="Migration Fee" value={g.wrikeMigration} onChange={ug("wrikeMigration")} prefix="$" help="One-time data migration (Y1 only)."/>
+              {Array.from({length:g.horizon},(_,i)=>(<Inp key={i} label={`Year ${i+1} Wrike License`} value={g.wrikeCostByYear[i]||0} onChange={v=>setWrikeCost(i,v)} prefix={g.currency}/>))}
+              <Inp label="Prof Services" value={g.wrikeProfServices} onChange={ug("wrikeProfServices")} prefix={g.currency} help="One-time professional services (Y1 only)."/>
               <div style={{fontSize:10,fontWeight:600,color:"#3b82f6",marginTop:6,marginBottom:4}}>Additional SKUs <Tip text="Wrike Lock, Wrike Integrate, or other add-on products. Added to every year's cost."/></div>
               {g.wrikeAdditionalSKUs.map((sku,idx)=>(<div key={idx} style={{display:"flex",gap:4,alignItems:"center",marginBottom:4}}>
                 <input value={sku.name} onChange={e=>{const a=[...g.wrikeAdditionalSKUs];a[idx]={...a[idx],name:e.target.value};setG(p=>({...p,wrikeAdditionalSKUs:a}));}} placeholder="SKU name" style={{flex:1,padding:"4px 6px",border:"1px solid #cbd5e1",borderRadius:4,fontSize:11,outline:"none"}}/>
-                <span style={{fontSize:11,color:"#475569"}}>$</span>
+                <span style={{fontSize:11,color:"#475569"}}>{g.currency}</span>
                 <input type="number" value={sku.annual} onChange={e=>{const a=[...g.wrikeAdditionalSKUs];a[idx]={...a[idx],annual:Number(e.target.value)};setG(p=>({...p,wrikeAdditionalSKUs:a}));}} style={{width:80,padding:"4px 6px",border:"1px solid #cbd5e1",borderRadius:4,fontSize:11,fontFamily:"'JetBrains Mono',monospace",outline:"none"}}/>
                 <span style={{fontSize:9,color:"#94a3b8"}}>/yr</span>
                 <button onClick={()=>{const a=[...g.wrikeAdditionalSKUs];a.splice(idx,1);setG(p=>({...p,wrikeAdditionalSKUs:a}));}} style={{border:"none",background:"none",cursor:"pointer",fontSize:14,color:"#dc2626",padding:"0 2px"}}>{"×"}</button>
@@ -823,24 +894,10 @@ function App(){
               <button onClick={()=>setG(p=>({...p,wrikeAdditionalSKUs:[...p.wrikeAdditionalSKUs,{name:"",annual:0}]}))} style={{fontSize:10,color:"#3b82f6",background:"none",border:"none",cursor:"pointer",fontWeight:600,padding:"2px 0"}}>+ Add SKU</button>
             </>)}
           </div>
-          {/* SHARED */}
-          <div style={{marginBottom:8}}>
-            <button onClick={()=>ts("_shared")} style={{width:"100%",display:"flex",alignItems:"center",padding:"5px 0",border:"none",background:"none",cursor:"pointer",borderBottom:"2px solid #475569",marginBottom:openSections._shared?6:0,textAlign:"left"}}>
-              <span style={{fontSize:10.5,fontWeight:700,color:"#475569",textTransform:"uppercase",letterSpacing:"0.04em",flex:1}}>Shared Assumptions</span>
-              <span style={{fontSize:9,color:"#94a3b8",transform:openSections._shared?"rotate(180deg)":"rotate(0)",transition:"transform 0.2s",marginLeft:4}}>{"\u25BC"}</span></button>
-            {openSections._shared&&(<>
-              <Inp label="Fully-Loaded FTE Cost" value={g.fteCost} onChange={ug("fteCost")} prefix="$" suffix="/yr" help="Salary + benefits + overhead. $100K = ~$48/hr."/>
-              <Sld label="Headcount Growth" value={g.headcountGrowth} onChange={ug("headcountGrowth")} min={0} max={0.2} step={0.005} format="pct" help="Cost of Inaction only — shows how problems scale."/>
-              <Sld label="Adoption Ramp" value={g.adoptionRamp} onChange={ug("adoptionRamp")} min={1} max={12} help="Months to full adoption. Y1 benefits prorated. 6-9mo typical."/>
-              <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:6,marginTop:4}}>
-                <button onClick={()=>setG(p=>({...p,discountEnabled:!p.discountEnabled}))} style={{width:34,height:18,borderRadius:9,border:"none",cursor:"pointer",position:"relative",background:g.discountEnabled?"#3b82f6":"#cbd5e1",transition:"background 0.2s",flexShrink:0}}>
-                  <div style={{width:14,height:14,borderRadius:7,background:"white",position:"absolute",top:2,left:g.discountEnabled?18:2,transition:"left 0.2s",boxShadow:"0 1px 2px rgba(0,0,0,0.2)"}}/></button>
-                <span style={{fontSize:10,fontWeight:600,color:"#64748b"}}>Discount Rate (NPV)</span>
-                <Tip text="Adjusts future savings to today's dollars. 8% standard. Ask finance."/></div>
-              {g.discountEnabled&&<Sld label="Discount Rate" value={g.discountRate} onChange={ug("discountRate")} min={0.03} max={0.15} step={0.005} format="pct"/>}
-            </>)}
-          </div>
         </div>}
+        <button onClick={()=>setPanelOpen(p=>!p)} style={{width:20,minWidth:20,background:panelOpen?"#e2e8f0":"#3b82f6",border:"none",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",borderRight:"1px solid #cbd5e1",transition:"background 0.2s"}}>
+          <span style={{fontSize:11,color:panelOpen?"#64748b":"white",transform:panelOpen?"rotate(0)":"rotate(180deg)",transition:"transform 0.2s"}}>{"\u25C0"}</span>
+        </button>
         {/* RIGHT */}
         <div style={{flex:1,padding:"16px 22px",overflowY:"auto",maxHeight:"calc(100vh - 60px)"}}>
           <div style={{display:"flex",gap:8,marginBottom:14,flexWrap:"wrap"}}>
@@ -992,6 +1049,36 @@ function App(){
           </div>
         </div>
       </div>
+      {/* TOAST */}
+      {toast&&<div style={{position:"fixed",bottom:24,left:"50%",transform:"translateX(-50%)",background:"#1e293b",color:"white",padding:"10px 24px",borderRadius:8,fontSize:12,fontWeight:600,boxShadow:"0 8px 24px rgba(0,0,0,0.3)",zIndex:2000,animation:"fadeIn 0.2s"}}>{toast}</div>}
+      {/* MY MODELS MODAL */}
+      {showModels&&<Modal onClose={()=>setShowModels(false)} wide>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+          <div style={{fontSize:16,fontWeight:700}}>My Prospect Models</div>
+          <div style={{display:"flex",gap:6}}>
+            <label style={{padding:"6px 12px",borderRadius:6,border:"1px solid #cbd5e1",background:"white",cursor:"pointer",fontSize:11,fontWeight:600,color:"#475569"}}>
+              Import JSON <input type="file" accept=".json" onChange={importJSON} style={{display:"none"}}/>
+            </label>
+            <button onClick={exportJSON} style={{padding:"6px 12px",borderRadius:6,border:"1px solid #cbd5e1",background:"white",cursor:"pointer",fontSize:11,fontWeight:600,color:"#475569"}}>Export Current</button>
+            <button onClick={()=>{const all=JSON.stringify(savedModels,null,2);const blob=new Blob([all],{type:"application/json"});const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download="Wrike_All_Models_Backup.json";a.click();}} style={{padding:"6px 12px",borderRadius:6,border:"1px solid #059669",background:"#ecfdf5",cursor:"pointer",fontSize:11,fontWeight:600,color:"#059669"}}>Backup All</button>
+          </div>
+        </div>
+        {savedModels.length===0?(<div style={{textAlign:"center",padding:"24px",color:"#94a3b8",fontSize:12}}>No saved models yet. Enter customer data and click Save.</div>):(
+          <div style={{display:"grid",gap:6}}>
+            {savedModels.map((m,i)=>(<div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"10px 12px",border:"1px solid #e2e8f0",borderRadius:8,background:"white"}}>
+              <div style={{flex:1}}>
+                <div style={{fontSize:13,fontWeight:700,color:"#1e293b"}}>{m.name}</div>
+                <div style={{fontSize:10,color:"#94a3b8"}}>{m.date} • {(m.d||[]).length} drivers • {m.g?.horizon||3}yr</div>
+              </div>
+              <button onClick={()=>loadModel(m)} style={{padding:"6px 12px",borderRadius:6,border:"none",background:"#3b82f6",color:"white",cursor:"pointer",fontSize:11,fontWeight:600}}>Load</button>
+              <button onClick={()=>{const data={...m};const blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"});const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=`Wrike_Model_${m.name}.json`;a.click();}} style={{padding:"6px 12px",borderRadius:6,border:"1px solid #cbd5e1",background:"white",cursor:"pointer",fontSize:11,fontWeight:600,color:"#475569"}}>Export</button>
+              <button onClick={()=>deleteModel(i)} style={{border:"none",background:"none",cursor:"pointer",fontSize:14,color:"#dc2626"}}>×</button>
+            </div>))}
+          </div>
+        )}
+        <div style={{marginTop:14,padding:"10px",background:"#f8fafc",borderRadius:6,border:"1px solid #e2e8f0",fontSize:10,color:"#64748b",lineHeight:1.5}}>
+          <strong>How it works:</strong> Models are saved in this browser. Use Export/Import JSON to share between team members or back up to Google Drive. The Share button creates a link for prospects.</div>
+      </Modal>}
       {/* SHARE MODAL */}
       {shareModal&&<Modal onClose={()=>setShareModal(false)}>
         <div style={{fontSize:16,fontWeight:700,marginBottom:8}}>Share This Model</div>
