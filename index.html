@@ -14,7 +14,9 @@
 <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/lz-string@1.5.0/libs/lz-string.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/pptxgenjs@3.12.0/dist/pptxgen.bundle.js"></script>
 </head>
 <body>
 <div id="root"></div>
@@ -25,10 +27,22 @@ const { useState, useMemo, useEffect } = React;
 function encodeState(drivers, g, kpis, removedKpis) {
   const state = { d: drivers, g, k: kpis, r: removedKpis };
   const json = JSON.stringify(state);
-  try { return btoa(unescape(encodeURIComponent(json))); } catch(e) { return null; }
+  try {
+    // LZ-string compress then encode for URL safety (60-70% smaller than plain base64)
+    return LZString.compressToEncodedURIComponent(json);
+  } catch(e) {
+    // Fallback to plain base64 if LZ-string unavailable
+    try { return btoa(unescape(encodeURIComponent(json))); } catch(e2) { return null; }
+  }
 }
 function decodeState(encoded) {
   try {
+    // Try LZ-string first
+    const json = LZString.decompressFromEncodedURIComponent(encoded);
+    if (json) return JSON.parse(json);
+  } catch(e) {}
+  try {
+    // Fallback: try legacy plain base64 (handles old shared URLs)
     const json = decodeURIComponent(escape(atob(encoded)));
     return JSON.parse(json);
   } catch(e) { return null; }
@@ -52,15 +66,18 @@ const FORMULA_TYPES = [
     defaults:{people:2,hoursPerCycle:8,cyclesPerYear:12,reduction:0.60},
     labels:{people:"Team Size",hoursPerCycle:"Hours / Cycle / Person",cyclesPerYear:"Cycles / Year",reduction:"% Reduction with Wrike"},
     freqPresets:[{l:"Weekly",v:52},{l:"Bi-weekly",v:26},{l:"Monthly",v:12},{l:"Quarterly",v:4},{l:"Annual",v:1}] },
-  { v:"incident", l:"Incident-Based", d:"People * Hours/Incident * Incidents/Yr * Rate * Recapture %",
+  { v:"incident", l:"Incident / Project-Based", d:"Incidents or Projects × Hours per Occurrence × Frequency × Recapture %",
     defaults:{people:10,hoursPerIncident:2,incidentsPerYear:12,recapture:0.60},
-    labels:{people:"People Affected",hoursPerIncident:"Hours / Person / Incident",incidentsPerYear:"Incidents / Year",recapture:"Recapture Rate"} },
+    labels:{people:"Incidents / Projects Affected",hoursPerIncident:"Hours / Person / Incident",incidentsPerYear:"Incidents / Year",recapture:"Recapture Rate"} },
   { v:"risk", l:"Risk Reduction", d:"Cost per Incident * (Current Probability - Wrike Probability)",
     defaults:{costPerIncident:100000,probCurrent:0.10,probWrike:0.02},
     labels:{costPerIncident:"Cost Per Incident",probCurrent:"Probability Today",probWrike:"Probability with Wrike"} },
   { v:"revenue", l:"Revenue Impact", d:"Annual Revenue at Risk * Improvement %",
     defaults:{annualValue:500000,improvement:0.10},
     labels:{annualValue:"Annual Revenue / Value at Risk",improvement:"% Improvement with Wrike"} },
+  { v:"project_delay", l:"Project Delay", d:"Projects/Yr * % Delayed * Avg Days Late * Daily Cost * Reduction %",
+    defaults:{projectsPerYear:24,delayRate:0.45,avgDelayDays:10,dailyCostOfDelay:1500,reductionRate:0.60},
+    labels:{projectsPerYear:"Projects / Year",delayRate:"% Projects Delayed",avgDelayDays:"Avg Days Late per Delayed Project",dailyCostOfDelay:"Daily Cost of Delay ($)",reductionRate:"% Reduction with Wrike"} },
 ];
 
 /* ═══ INDUSTRY BENCHMARKS ═══ */
@@ -83,6 +100,8 @@ const INDUSTRY_BENCHMARKS = {
   "lib_ttm": {benchmark:"5-15% reduction",source:"Agile benchmarks"},
   "lib_retention": {benchmark:"3-8% uplift",source:"Customer study"},
   "lib_capacity": {benchmark:"15-25% increase",source:"Resource study"},
+  "lib_proj_delay": {benchmark:"40-60% of projects delayed",source:"PMI Pulse of the Profession, 2024"},
+  "lib_proj_resource": {benchmark:"35-50% of projects impacted by resource conflicts",source:"Gartner PPM Study, 2023"},
 };
 
 /* ═══ DRIVER LIBRARY ═══ */
@@ -151,10 +170,22 @@ const DRIVER_LIBRARY = [
       inputs:{annualValue:500000,improvement:0.10}, labels:{annualValue:"Potential Additional Revenue",improvement:"% Capacity Unlocked"},
       kpis:["Projects delivered per quarter","Utilization rate (%)"] },
   ]},
+  { cat:"Project Execution", items:[
+    { id:"lib_proj_delay", name:"Project Delay Impact", type:"project_delay",
+      tip:"Cost of projects that miss their go-live date. Captures delayed revenue, extended resource burn, and downstream business impact. Ask: 'What % of your projects slip, by how many days on average, and what does a single day of delay cost the business?'",
+      inputs:{projectsPerYear:24,delayRate:0.45,avgDelayDays:10,dailyCostOfDelay:1500,reductionRate:0.60},
+      labels:{projectsPerYear:"Projects / Year",delayRate:"% Projects Delayed",avgDelayDays:"Avg Days Late per Delayed Project",dailyCostOfDelay:"Daily Cost of Delay ($)",reductionRate:"% Reduction with Wrike"},
+      kpis:["% of projects delivered on or before go-live date","Average days late per delayed project","Number of projects delayed per quarter"] },
+    { id:"lib_proj_resource", name:"Resource Conflicts Across Projects", type:"incident",
+      tip:"Cost of projects stalled because key people are double-booked across concurrent work. Without visibility into who is working on what, teams can't plan around capacity — causing delays and dropped handoffs. NOTE: Enter total team hours lost per conflict in the hours field — not per-person hours. Example: if 3 people each lose 2 hours when a conflict occurs, enter 6.",
+      inputs:{people:12,hoursPerIncident:4,incidentsPerYear:24,recapture:0.55},
+      labels:{people:"Projects Impacted / Year",hoursPerIncident:"Avg Hours Lost per Conflict",incidentsPerYear:"Resource Conflicts / Year",recapture:"% Recaptured with Wrike"},
+      kpis:["% of projects impacted by resource conflicts","Average days lost to resource contention","Resource utilization rate (%)"] },
+  ]},
 ];
 
 const COLORS = ["#8b5cf6","#06b6d4","#0891b2","#f59e0b","#d97706","#10b981","#ec4899","#6366f1","#14b8a6","#f97316","#84cc16","#a855f7"];
-const CAT_COLORS = {"Productivity":"#8b5cf6","Integration & Tool Sprawl":"#06b6d4","Risk & Compliance":"#f59e0b","Quality & Rework":"#ec4899","Revenue & Strategic":"#10b981"};
+const CAT_COLORS = {"Productivity":"#8b5cf6","Integration & Tool Sprawl":"#06b6d4","Risk & Compliance":"#f59e0b","Quality & Rework":"#ec4899","Revenue & Strategic":"#10b981","Project Execution":"#0ea5e9"};
 
 const DEFAULT_GLOBALS = {
   customerName:"", currency:"$", horizon:3,
@@ -191,6 +222,7 @@ function calcDriver(d, hr, af) {
     case "incident": return i.people*i.hoursPerIncident*i.incidentsPerYear*hr*i.recapture*af;
     case "risk": return (i.costPerIncident*i.probCurrent)-(i.costPerIncident*i.probWrike);
     case "revenue": return i.annualValue*i.improvement*af;
+    case "project_delay": return i.projectsPerYear*i.delayRate*i.avgDelayDays*i.dailyCostOfDelay*i.reductionRate*af;
     default: return 0;
   }
 }
@@ -201,6 +233,7 @@ function calcCoi(d, hr) {
     case "incident": return i.people*i.hoursPerIncident*i.incidentsPerYear*hr;
     case "risk": return i.costPerIncident*i.probCurrent;
     case "revenue": return i.annualValue*i.improvement;
+    case "project_delay": return i.projectsPerYear*i.delayRate*i.avgDelayDays*i.dailyCostOfDelay;
     default: return 0;
   }
 }
@@ -253,9 +286,9 @@ function exportCSV(model, drivers, g, scenarios, scenarioResults, kpis) {
   
   /* Determine input style based on field name */
   function inputStyle(k){
-    if(k.includes("prob")||k.includes("recapture")||k.includes("reduction")||k.includes("improvement")||k.includes("Growth"))return S.inpP;
-    if(k.includes("cost")||k.includes("Cost")||k.includes("Value")||k.includes("value")||k==="annualValue")return S.inp$;
-    return S.inpN;  /* people, hours, cycles, incidents = plain number */
+    if(k.includes("prob")||k.includes("recapture")||k.includes("reduction")||k.includes("improvement")||k.includes("Growth")||k==="delayRate"||k==="reductionRate")return S.inpP;
+    if(k.includes("cost")||k.includes("Cost")||k.includes("Value")||k.includes("value")||k==="annualValue"||k==="dailyCostOfDelay")return S.inp$;
+    return S.inpN;  /* people, hours, cycles, incidents, projects, days = plain number */
   }
   
   /* ═══ TAB 1: ASSUMPTIONS ═══ */
@@ -396,25 +429,28 @@ function exportCSV(model, drivers, g, scenarios, scenarioResults, kpis) {
       else if(d.type==="incident")f="="+aRef["d"+di+"_people"]+"*"+aRef["d"+di+"_hoursPerIncident"]+"*"+aRef["d"+di+"_incidentsPerYear"]+"*"+hrc+"*"+aRef["d"+di+"_recapture"]+"*"+af;
       else if(d.type==="risk")f="=("+aRef["d"+di+"_costPerIncident"]+"*"+aRef["d"+di+"_probCurrent"]+")-("+aRef["d"+di+"_costPerIncident"]+"*"+aRef["d"+di+"_probWrike"]+")";
       else if(d.type==="revenue")f="="+aRef["d"+di+"_annualValue"]+"*"+aRef["d"+di+"_improvement"]+"*"+af;
+      else if(d.type==="project_delay")f="="+aRef["d"+di+"_projectsPerYear"]+"*"+aRef["d"+di+"_delayRate"]+"*"+aRef["d"+di+"_avgDelayDays"]+"*"+aRef["d"+di+"_dailyCostOfDelay"]+"*"+aRef["d"+di+"_reductionRate"]+"*"+af;
       sf(ws2,r,c,f,S.$);
     }
     sf(ws2,r,tCol,"=SUM("+cn(1)+(r+1)+":"+cn(H)+(r+1)+")",S.tot);
     dRows.push(r);r++;
 
-    /* Hours sub-row — only for time and incident drivers */
-    if(d.type==="time"||d.type==="incident"){
+    /* Hours sub-row — only for time, incident, and project_delay drivers */
+    if(d.type==="time"||d.type==="incident"||d.type==="project_delay"){
       const hStyle={font:{sz:10,italic:true,color:{rgb:"7C3AED"},name:"Arial"},numFmt:"#,##0",alignment:{horizontal:"right"}};
       const hLbl={font:{sz:10,italic:true,color:{rgb:"7C3AED"},name:"Arial"}};
-      sc(ws2,r,0,d.name+" — Hours Saved",hLbl);
+      sc(ws2,r,0,d.name+(d.type==="project_delay"?" — Project-Days Saved":" — Hours Saved"),hLbl);
       for(let yi=0;yi<H;yi++){
         const c=yi+1;const af=cn(c)+(afRow+1);
         let f="";
         if(d.type==="time")f="="+aRef["d"+di+"_people"]+"*"+aRef["d"+di+"_hoursPerCycle"]+"*"+aRef["d"+di+"_cyclesPerYear"]+"*"+aRef["d"+di+"_reduction"]+"*"+af;
         else if(d.type==="incident")f="="+aRef["d"+di+"_people"]+"*"+aRef["d"+di+"_hoursPerIncident"]+"*"+aRef["d"+di+"_incidentsPerYear"]+"*"+aRef["d"+di+"_recapture"]+"*"+af;
+        else if(d.type==="project_delay")f="="+aRef["d"+di+"_projectsPerYear"]+"*"+aRef["d"+di+"_delayRate"]+"*"+aRef["d"+di+"_avgDelayDays"]+"*"+aRef["d"+di+"_reductionRate"]+"*"+af;
         sf(ws2,r,c,f,hStyle);
       }
       sf(ws2,r,tCol,"=SUM("+cn(1)+(r+1)+":"+cn(H)+(r+1)+")",hStyle);
-      hRows.push(r);r++;
+      if(d.type!=="project_delay") hRows.push(r);
+      r++;
     }
   });
   
@@ -492,7 +528,7 @@ function exportCSV(model, drivers, g, scenarios, scenarioResults, kpis) {
   });
   /* Per-driver cost of inaction lines */
   el.forEach(d=>{
-    const coiLabel=d.type==="risk"?"compliance risk exposure":d.type==="revenue"?"unrealized revenue":d.type==="incident"?"incident recovery cost":"wasted productivity";
+    const coiLabel=d.type==="risk"?"compliance risk exposure":d.type==="revenue"?"unrealized revenue":d.type==="incident"?"incident recovery cost":d.type==="project_delay"?"project delay cost":"wasted productivity";
     sc(ws3,r,0,d.name+" ("+coiLabel+")",S.lbl);
     for(let i=0;i<H;i++){
       const yData=model.years[Math.min(i,model.years.length-1)];
@@ -621,6 +657,25 @@ function exportCSV(model, drivers, g, scenarios, scenarioResults, kpis) {
       sc(ws4,r,5,"—",cellNA);sc(ws4,r,6,"—",cellNA);sc(ws4,r,7,"—",cellNA);
       sf(ws4,r,8,"="+aRef["d"+di+"_annualValue"]+"*"+aRef["d"+di+"_improvement"],cell$);
       dollarRows.push(rowRef);
+
+    } else if(d.type==="project_delay"){
+      /* Col B: Projects/Year */
+      sf(ws4,r,1,"="+aRef["d"+di+"_projectsPerYear"],cellN);
+      /* Col C: % Delayed */
+      sf(ws4,r,2,"="+aRef["d"+di+"_delayRate"],cellP);
+      /* Col D: Avg Days Late */
+      sf(ws4,r,3,"="+aRef["d"+di+"_avgDelayDays"],cellN);
+      /* Col E: Reduction % */
+      sf(ws4,r,4,"="+aRef["d"+di+"_reductionRate"],cellP);
+      /* Col F: Baseline delayed project-days = projects * rate * days */
+      sf(ws4,r,5,"=B"+rowRef+"*C"+rowRef+"*D"+rowRef,cellHrs);
+      /* Col G: Goal delayed project-days = Baseline * (1 - Reduction) */
+      sf(ws4,r,6,"=F"+rowRef+"*(1-E"+rowRef+")",cellHrsGoal);
+      /* Col H: Project-days saved = Baseline - Goal */
+      sf(ws4,r,7,"=F"+rowRef+"-G"+rowRef,cellHrsSaved);
+      /* Col I: Annual $ Value = days saved * daily cost */
+      sf(ws4,r,8,"=H"+rowRef+"*"+aRef["d"+di+"_dailyCostOfDelay"],cell$);
+      baseHrsRows.push(rowRef);goalHrsRows.push(rowRef);savedHrsRows.push(rowRef);dollarRows.push(rowRef);
     }
     r++;
   });
@@ -647,6 +702,671 @@ function exportCSV(model, drivers, g, scenarios, scenarioResults, kpis) {
   XLSX.utils.book_append_sheet(wb,ws4,"Presales Baseline");
   
   XLSX.writeFile(wb,`Wrike_Value_Model${g.customerName?" - "+g.customerName:""}.xlsx`);
+}
+
+/* ── PPTX Export ── */
+function exportPPTX(model, drivers, g) {
+  if (typeof PptxGenJS === "undefined") { alert("PPTX export requires browser with CDN access."); return; }
+
+  const el = drivers.filter(d => d.enabled);
+  const H = g.horizon;
+  const cName = g.customerName || "[CUSTOMER NAME]";
+  const fmt = (n) => { const a = Math.abs(Math.round(n)); const s = a.toLocaleString("en-US"); return (n < 0 ? "-$" : "$") + s; };
+  const fmtK = (n) => { const a = Math.abs(n); if (a >= 1e6) return (n<0?"-":"")+"$"+(Math.abs(n)/1e6).toFixed(1)+"M"; if (a >= 1e3) return (n<0?"-":"")+"$"+(Math.abs(n)/1e3).toFixed(0)+"K"; return (n<0?"-":"")+"$"+Math.round(Math.abs(n)); };
+  const pct = (n) => (n * 100).toFixed(1) + "%";
+
+  // Brand colors (no # prefix — PptxGenJS requirement)
+  const C = {
+    bg:       "121722",  // slide background
+    bgCard:   "1E2D45",  // card backgrounds
+    bgDark:   "0D1526",  // deeper dark
+    bgMid:    "162136",  // medium dark
+    bgLight:  "2A3F5C",  // lighter card
+    green:    "00E05C",  // positive accent
+    teal:     "37CEBA",  // secondary accent
+    yellow:   "FFCF00",  // highlight accent
+    red:      "EF4444",  // cost / risk
+    white:    "FFFFFF",
+    muted:    "A0AEC0",
+    mutedDim: "6B7A99",
+    border:   "2A3F5C",
+  };
+
+  const pres = new PptxGenJS();
+  pres.layout = "LAYOUT_16x9"; // 10" × 5.625"
+  pres.title = `Wrike Business Case — ${cName}`;
+  pres.author = "Wrike Value Model";
+
+  // ─── Helpers ─────────────────────────────────────────────────────────────
+
+  // Add dark slide background + subtle top accent bar + footer
+  function addBase(slide, accentColor) {
+    const ac = accentColor || C.green;
+    slide.background = { color: C.bg };
+    // Top accent stripe
+    slide.addShape(pres.shapes.RECTANGLE, { x: 0, y: 0, w: 10, h: 0.04, fill: { color: ac }, line: { type: "none" } });
+    // Footer bar
+    slide.addShape(pres.shapes.RECTANGLE, { x: 0, y: 5.45, w: 10, h: 0.175, fill: { color: C.bgDark }, line: { type: "none" } });
+    // Footer text
+    slide.addText("© Wrike, Inc. | Confidential", { x: 0.3, y: 5.46, w: 4, h: 0.15, fontSize: 7, color: C.mutedDim, fontFace: "Arial", valign: "middle", margin: 0 });
+    // Footer Wrike wordmark (right side)
+    slide.addText("wrike", { x: 8.5, y: 5.46, w: 1.2, h: 0.15, fontSize: 8, bold: true, color: C.white, fontFace: "Arial", align: "right", valign: "middle", margin: 0 });
+  }
+
+  // Slide title (top-left, clean)
+  function addTitle(slide, title, subtitle) {
+    slide.addText(title, { x: 0.4, y: 0.14, w: 9.2, h: 0.42, fontSize: 18, bold: true, color: C.white, fontFace: "Arial", valign: "middle", margin: 0 });
+    if (subtitle) {
+      slide.addText(subtitle, { x: 0.4, y: 0.56, w: 9.2, h: 0.22, fontSize: 9, color: C.muted, fontFace: "Arial", valign: "middle", margin: 0 });
+    }
+  }
+
+  // KPI card: dark card with label, big value, sub-label
+  function addKpiCard(slide, x, y, w, h, label, value, sub, valueColor) {
+    const vc = valueColor || C.green;
+    slide.addShape(pres.shapes.RECTANGLE, { x, y, w, h, fill: { color: C.bgCard }, line: { color: C.border, pt: 1 } });
+    slide.addText(label, { x: x + 0.12, y: y + 0.10, w: w - 0.24, h: 0.18, fontSize: 7, color: C.muted, fontFace: "Arial", bold: true, charSpacing: 1, margin: 0 });
+    slide.addText(value, { x: x + 0.12, y: y + 0.28, w: w - 0.24, h: 0.38, fontSize: 20, bold: true, color: vc, fontFace: "Arial", valign: "middle", margin: 0 });
+    if (sub) {
+      slide.addText(sub, { x: x + 0.12, y: y + 0.66, w: w - 0.24, h: 0.16, fontSize: 7.5, color: C.mutedDim, fontFace: "Arial", margin: 0 });
+    }
+  }
+
+  // Section divider label (small caps-style label)
+  function addSectionLabel(slide, x, y, w, text, color) {
+    const col = color || C.teal;
+    slide.addText(text.toUpperCase(), { x, y, w, h: 0.18, fontSize: 7, bold: true, color: col, fontFace: "Arial", charSpacing: 1.5, margin: 0 });
+  }
+
+  // ─── SLIDE 1: Instructions ────────────────────────────────────────────────
+  {
+    const s = pres.addSlide();
+    s.background = { color: "2A0A0A" }; // distinct red-dark so it's obvious
+    s.addShape(pres.shapes.RECTANGLE, { x: 0, y: 0, w: 10, h: 0.04, fill: { color: C.red }, line: { type: "none" } });
+    s.addText("⚠  INSTRUCTIONS — DELETE THIS SLIDE BEFORE SHARING", {
+      x: 0.4, y: 0.18, w: 9.2, h: 0.4, fontSize: 16, bold: true, color: C.red, fontFace: "Arial"
+    });
+    s.addText("Data-driven slides are pre-populated from your live model. Narrative slides contain placeholder text — customize before presenting.", {
+      x: 0.4, y: 0.72, w: 9.2, h: 0.35, fontSize: 10, color: C.white, fontFace: "Arial", italic: true
+    });
+    const rows = [
+      [{ text: "Slide", options: { bold: true, color: C.white, fill: { color: "3D0000" } } }, { text: "Title", options: { bold: true, color: C.white, fill: { color: "3D0000" } } }, { text: "Type", options: { bold: true, color: C.white, fill: { color: "3D0000" } } }, { text: "Action Needed", options: { bold: true, color: C.white, fill: { color: "3D0000" } } }],
+      ["2", "Cover / Title", { text: "✓ Live Data", options: { color: C.green } }, "Verify customer name, sponsor, AE, date"],
+      ["3", "Executive Summary", { text: "✓ Live Data", options: { color: C.green } }, "Add 3 current-state challenges"],
+      ["4", "Existing Team Results", { text: "⊘ Optional", options: { color: C.yellow } }, "Use for expansion deals only — delete if not applicable"],
+      ["5", "Current State & Challenges", "Placeholder", "Fill in pain points from discovery"],
+      ["6", "Future State", "Placeholder", "Customize FTE avoidance number"],
+      ["7", "Quantifying the Switch", { text: "✓ Live Data", options: { color: C.green } }, "Verify lever names match your pitch"],
+      ["8", "Strategic Value Beyond ROI", "Placeholder", "Fill in revenue / retention / talent angles"],
+      ["9", "Financial Summary", { text: "✓ Live Data", options: { color: C.green } }, "Ready to present — verify table values"],
+      ["10", "Risks & Mitigations", { text: "⊘ Optional", options: { color: C.yellow } }, "Keep or delete based on audience"],
+      ["11", "Implementation Overview", { text: "⊘ Optional", options: { color: C.yellow } }, "Keep or delete based on deal stage"],
+      ["12", "Next Steps", "Placeholder", "Fill in owners and target dates"],
+      ["13", "Customer Success Stories", { text: "⊘ Optional", options: { color: C.yellow } }, "Add 2 relevant references"],
+      ["14", "Appendix", "Placeholder", "Review and customize sections"],
+    ];
+    s.addTable(rows, {
+      x: 0.4, y: 1.12, w: 9.2, h: 4.15,
+      border: { pt: 0.5, color: "5A1A1A" },
+      colW: [0.5, 2.1, 1.4, 5.2],
+      fontSize: 8, color: C.muted, fontFace: "Arial",
+      rowH: 0.27,
+    });
+  }
+
+  // ─── SLIDE 2: Cover ───────────────────────────────────────────────────────
+  {
+    const s = pres.addSlide();
+    addBase(s, C.green);
+    // Large background accent shape (right side)
+    s.addShape(pres.shapes.RECTANGLE, { x: 6.5, y: 0.04, w: 3.5, h: 5.41, fill: { color: C.bgCard }, line: { type: "none" } });
+    s.addShape(pres.shapes.RECTANGLE, { x: 6.5, y: 0.04, w: 0.04, h: 5.41, fill: { color: C.green }, line: { type: "none" } });
+
+    // Left: main title block
+    s.addText("wrike", { x: 0.4, y: 0.25, w: 2, h: 0.32, fontSize: 14, bold: true, color: C.white, fontFace: "Arial", margin: 0 });
+    s.addShape(pres.shapes.RECTANGLE, { x: 0.4, y: 0.6, w: 0.3, h: 0.04, fill: { color: C.green }, line: { type: "none" } });
+    s.addText(cName, { x: 0.4, y: 0.75, w: 5.8, h: 0.45, fontSize: 22, bold: true, color: C.white, fontFace: "Arial", margin: 0 });
+    s.addText("Business Case for Wrike", { x: 0.4, y: 1.22, w: 5.8, h: 0.35, fontSize: 14, color: C.teal, fontFace: "Arial", margin: 0 });
+    s.addText(`A ${H}-year financial analysis quantifying the ROI of adopting Wrike.`, {
+      x: 0.4, y: 1.68, w: 5.7, h: 0.3, fontSize: 9, color: C.muted, fontFace: "Arial", italic: true, margin: 0
+    });
+
+    // KPI trio mid-left
+    const npvVal = fmtK(model.npv);
+    const roiVal = pct(model.roi);
+    const pbVal  = model.pbm ? model.pbm + " mo" : "N/A";
+    addKpiCard(s, 0.4, 2.1, 1.85, 0.95, "NET PRESENT VALUE", npvVal, `${H}yr @ ${pct(g.discountRate || 0.08)}`, model.npv >= 0 ? C.green : C.red);
+    addKpiCard(s, 2.38, 2.1, 1.85, 0.95, "TOTAL ROI", roiVal, fmtK(model.tb) + " benefit", model.roi >= 0 ? C.teal : C.red);
+    addKpiCard(s, 4.36, 2.1, 1.85, 0.95, "PAYBACK PERIOD", pbVal, model.pbm ? `~${(model.pbm/12).toFixed(1)} years` : "", C.yellow);
+
+    s.addText("Where work flows.", { x: 0.4, y: 3.3, w: 5.8, h: 0.28, fontSize: 11, italic: true, color: C.mutedDim, fontFace: "Arial", margin: 0 });
+
+    // Right panel: prepared by/for
+    addSectionLabel(s, 6.7, 0.3, 3.1, "Prepared for", C.muted);
+    s.addText("[EXECUTIVE SPONSOR]", { x: 6.7, y: 0.52, w: 3.1, h: 0.25, fontSize: 11, bold: true, color: C.white, fontFace: "Arial", margin: 0 });
+    s.addText("[TITLE]", { x: 6.7, y: 0.77, w: 3.1, h: 0.18, fontSize: 8, color: C.muted, fontFace: "Arial", margin: 0 });
+
+    s.addShape(pres.shapes.RECTANGLE, { x: 6.7, y: 1.08, w: 3.1, h: 0.01, fill: { color: C.border }, line: { type: "none" } });
+
+    addSectionLabel(s, 6.7, 1.2, 3.1, "Prepared by", C.muted);
+    s.addText("[WRIKE AE NAME]", { x: 6.7, y: 1.42, w: 3.1, h: 0.25, fontSize: 11, bold: true, color: C.white, fontFace: "Arial", margin: 0 });
+    s.addText("[TITLE]", { x: 6.7, y: 1.67, w: 3.1, h: 0.18, fontSize: 8, color: C.muted, fontFace: "Arial", margin: 0 });
+
+    s.addShape(pres.shapes.RECTANGLE, { x: 6.7, y: 1.98, w: 3.1, h: 0.01, fill: { color: C.border }, line: { type: "none" } });
+
+    addSectionLabel(s, 6.7, 2.1, 3.1, "Date", C.muted);
+    s.addText("[MONTH YEAR]", { x: 6.7, y: 2.3, w: 3.1, h: 0.25, fontSize: 11, bold: true, color: C.white, fontFace: "Arial", margin: 0 });
+
+    // Model summary box at bottom of right panel
+    s.addShape(pres.shapes.RECTANGLE, { x: 6.55, y: 3.8, w: 3.25, h: 1.45, fill: { color: C.bgMid }, line: { color: C.border, pt: 1 } });
+    s.addText("Model Parameters", { x: 6.7, y: 3.88, w: 3.0, h: 0.18, fontSize: 7.5, bold: true, color: C.teal, fontFace: "Arial", charSpacing: 0.5, margin: 0 });
+    const paramLines = [
+      `Time Horizon: ${H} years`,
+      `Discount Rate: ${pct(g.discountRate || 0.08)}`,
+      `FTE Fully-Loaded Cost: ${fmtK(g.fteCost || 0)}/yr`,
+      `Adoption Ramp: ${g.adoptionRamp || 0} months`,
+      `Headcount Growth: ${pct(g.headcountGrowth || 0)}/yr`,
+    ];
+    s.addText(paramLines.map((l, i) => ({ text: l, options: { breakLine: i < paramLines.length - 1 } })),
+      { x: 6.7, y: 4.1, w: 3.0, h: 1.05, fontSize: 7.5, color: C.muted, fontFace: "Arial", lineSpacingMultiple: 1.3, margin: 0 });
+  }
+
+  // ─── SLIDE 3: Executive Summary ───────────────────────────────────────────
+  {
+    const s = pres.addSlide();
+    addBase(s, C.teal);
+    addTitle(s, "Executive Summary", `${cName} · ${H}-Year Business Case`);
+
+    // 4 KPI cards across top
+    const kpis4 = [
+      { label: "NPV", value: fmtK(model.npv), sub: `${H}-yr @ ${pct(g.discountRate || 0.08)}`, color: model.npv >= 0 ? C.green : C.red },
+      { label: "TOTAL ROI", value: pct(model.roi), sub: fmtK(model.tb) + " total benefit", color: model.roi >= 0 ? C.teal : C.red },
+      { label: "PAYBACK PERIOD", value: model.pbm ? model.pbm + " mo" : "N/A", sub: model.pbm ? `~${(model.pbm/12).toFixed(1)} years` : "", color: C.yellow },
+      { label: "COST OF INACTION", value: fmtK(model.coiTotal), sub: `${H}-yr do-nothing cost`, color: C.red },
+    ];
+    kpis4.forEach((k, i) => addKpiCard(s, 0.3 + i * 2.36, 0.88, 2.2, 0.92, k.label, k.value, k.sub, k.color));
+
+    // Left: current state challenges
+    s.addShape(pres.shapes.RECTANGLE, { x: 0.3, y: 1.94, w: 5.35, h: 3.3, fill: { color: C.bgCard }, line: { color: C.border, pt: 1 } });
+    addSectionLabel(s, 0.5, 2.02, 5.0, "Current State Challenges", C.muted);
+    const challenges = [
+      { n: "1", label: "[CHALLENGE 1]", desc: "Brief description of the primary pain point your champion named." },
+      { n: "2", label: "[CHALLENGE 2]", desc: "Brief description of the second operational challenge." },
+      { n: "3", label: "[CHALLENGE 3]", desc: "Brief description of the third challenge or risk area." },
+    ];
+    challenges.forEach((ch, i) => {
+      const cy = 2.26 + i * 0.93;
+      s.addShape(pres.shapes.RECTANGLE, { x: 0.5, y: cy, w: 0.28, h: 0.28, fill: { color: C.teal }, line: { type: "none" } });
+      s.addText(ch.n, { x: 0.5, y: cy, w: 0.28, h: 0.28, fontSize: 10, bold: true, color: C.bg, fontFace: "Arial", align: "center", valign: "middle", margin: 0 });
+      s.addText(ch.label, { x: 0.86, y: cy, w: 4.65, h: 0.22, fontSize: 9.5, bold: true, color: C.white, fontFace: "Arial", margin: 0 });
+      s.addText(ch.desc, { x: 0.86, y: cy + 0.23, w: 4.65, h: 0.6, fontSize: 8, color: C.muted, fontFace: "Arial", margin: 0, wrap: true });
+    });
+
+    // Right: lever breakdown mini chart
+    s.addShape(pres.shapes.RECTANGLE, { x: 5.8, y: 1.94, w: 3.9, h: 3.3, fill: { color: C.bgCard }, line: { color: C.border, pt: 1 } });
+    addSectionLabel(s, 6.0, 2.02, 3.6, `${H}-Year Value by Driver`, C.muted);
+    const leverColors = ["00E05C", "37CEBA", "FFCF00", "EF4444", "A78BFA", "F97316", "14B8A6", "EC4899"];
+    const allLevers = [
+      ...el.map(d => ({ name: d.name, val: model.lt[d.id] || 0 })),
+      ...(model.lt._l4 > 0 ? [{ name: "Platform Consolidation", val: model.lt._l4 }] : []),
+      ...(model.lt._fte > 0 ? [{ name: "FTE Avoidance", val: model.lt._fte }] : []),
+    ].filter(l => l.val > 0).sort((a, b) => b.val - a.val);
+
+    const maxVal = allLevers.length > 0 ? allLevers[0].val : 1;
+    const barMaxW = 2.5;
+    allLevers.slice(0, 6).forEach((lev, i) => {
+      const by = 2.25 + i * 0.48;
+      const barW = Math.max(0.05, (lev.val / maxVal) * barMaxW);
+      const lc = leverColors[i % leverColors.length];
+      s.addText(lev.name, { x: 6.0, y: by, w: 3.5, h: 0.18, fontSize: 7.5, color: C.muted, fontFace: "Arial", margin: 0 });
+      s.addShape(pres.shapes.RECTANGLE, { x: 6.0, y: by + 0.19, w: barW, h: 0.14, fill: { color: lc }, line: { type: "none" } });
+      s.addText(fmtK(lev.val), { x: 6.0 + barW + 0.05, y: by + 0.17, w: 1.5, h: 0.18, fontSize: 7.5, bold: true, color: lc, fontFace: "Arial", margin: 0 });
+    });
+    // Total
+    s.addShape(pres.shapes.RECTANGLE, { x: 6.0, y: 5.02, w: 3.6, h: 0.01, fill: { color: C.border }, line: { type: "none" } });
+    s.addText(`${H}-Year Total: ${fmtK(model.tb)}`, { x: 6.0, y: 5.07, w: 3.6, h: 0.18, fontSize: 8.5, bold: true, color: C.green, fontFace: "Arial", margin: 0 });
+  }
+
+  // ─── SLIDE 4: Existing Team Results (Optional) ────────────────────────────
+  {
+    const s = pres.addSlide();
+    addBase(s, C.yellow);
+    addTitle(s, "Results from Existing Wrike Teams", "OPTIONAL — Expansion deals only");
+
+    s.addShape(pres.shapes.RECTANGLE, { x: 0.3, y: 0.88, w: 9.4, h: 0.3, fill: { color: C.bgMid }, line: { type: "none" } });
+    s.addText(`[COMPANY] teams already using Wrike have demonstrated measurable outcomes. Expand this success across the enterprise.`, {
+      x: 0.45, y: 0.92, w: 9.1, h: 0.22, fontSize: 8, italic: true, color: C.muted, fontFace: "Arial", margin: 0
+    });
+
+    const metrics = [
+      { val: "[X]%", label: "Reduction in Reporting Time" },
+      { val: "[X] hrs/wk", label: "Reclaimed Per Team Member" },
+      { val: "[X] mo", label: "Payback Achieved" },
+    ];
+    metrics.forEach((m, i) => {
+      const mx = 0.4 + i * 3.2;
+      s.addShape(pres.shapes.RECTANGLE, { x: mx, y: 1.3, w: 2.95, h: 1.35, fill: { color: C.bgCard }, line: { color: C.border, pt: 1 } });
+      s.addText(m.val, { x: mx + 0.15, y: 1.38, w: 2.65, h: 0.6, fontSize: 28, bold: true, color: C.yellow, fontFace: "Arial", margin: 0 });
+      s.addText(m.label, { x: mx + 0.15, y: 1.98, w: 2.65, h: 0.22, fontSize: 8, color: C.muted, fontFace: "Arial", margin: 0 });
+    });
+
+    // Quote block
+    s.addShape(pres.shapes.RECTANGLE, { x: 0.3, y: 2.82, w: 9.4, h: 1.65, fill: { color: C.bgCard }, line: { color: C.border, pt: 1 } });
+    s.addShape(pres.shapes.RECTANGLE, { x: 0.3, y: 2.82, w: 0.08, h: 1.65, fill: { color: C.yellow }, line: { type: "none" } });
+    s.addText('"', { x: 0.48, y: 2.85, w: 0.4, h: 0.4, fontSize: 36, bold: true, color: C.yellow, fontFace: "Arial", margin: 0 });
+    s.addText("[INSERT QUOTE FROM EXISTING WRIKE USER AT THIS ACCOUNT — e.g., \"Wrike gave us the visibility we never had.\"]", {
+      x: 0.48, y: 3.15, w: 9.0, h: 0.7, fontSize: 9, italic: true, color: C.white, fontFace: "Arial", margin: 0, wrap: true
+    });
+    s.addText("— [NAME], [TITLE], [DEPARTMENT]", { x: 0.48, y: 4.05, w: 9.0, h: 0.2, fontSize: 8, color: C.muted, fontFace: "Arial", margin: 0 });
+    s.addText("[Case study or internal data reference]", { x: 0.48, y: 4.28, w: 9.0, h: 0.18, fontSize: 7.5, color: C.mutedDim, italic: true, fontFace: "Arial", margin: 0 });
+  }
+
+  // ─── SLIDE 5: Current State & Challenges ─────────────────────────────────
+  {
+    const s = pres.addSlide();
+    addBase(s, C.red);
+    addTitle(s, "Current State & Challenges");
+
+    s.addText("[One sentence framing the current situation — e.g., \"Today, [COMPANY] operates across [X] teams using fragmented, manual tools that limit visibility and scale.\"]", {
+      x: 0.4, y: 0.82, w: 9.2, h: 0.3, fontSize: 8.5, italic: true, color: C.muted, fontFace: "Arial", margin: 0
+    });
+
+    const areas = [
+      { title: "[Challenge Area 1]", ex: "e.g., Visibility & Decision-Making", pts: ["[Specific pain point with a data point if available]", "[Second pain point — tool fragmentation, manual work, etc.]", "[Third pain point — risk or downstream impact]"] },
+      { title: "[Challenge Area 2]", ex: "e.g., Resource & Capacity", pts: ["[Specific pain point with a data point if available]", "[Second pain point]", "[Third pain point]"] },
+      { title: "[Challenge Area 3]", ex: "e.g., Compliance & Risk", pts: ["[Specific pain point with a data point if available]", "[Second pain point]", "[Third pain point]"] },
+    ];
+    areas.forEach((a, i) => {
+      const ax = 0.3 + i * 3.22;
+      s.addShape(pres.shapes.RECTANGLE, { x: ax, y: 1.2, w: 3.05, h: 3.95, fill: { color: C.bgCard }, line: { color: C.border, pt: 1 } });
+      s.addShape(pres.shapes.RECTANGLE, { x: ax, y: 1.2, w: 3.05, h: 0.06, fill: { color: C.red }, line: { type: "none" } });
+      s.addText(a.title, { x: ax + 0.12, y: 1.3, w: 2.8, h: 0.26, fontSize: 10, bold: true, color: C.white, fontFace: "Arial", margin: 0 });
+      s.addText(a.ex, { x: ax + 0.12, y: 1.57, w: 2.8, h: 0.18, fontSize: 7.5, italic: true, color: C.muted, fontFace: "Arial", margin: 0 });
+      a.pts.forEach((pt, pi) => {
+        const py = 1.85 + pi * 0.82;
+        s.addShape(pres.shapes.OVAL, { x: ax + 0.12, y: py + 0.04, w: 0.1, h: 0.1, fill: { color: C.red }, line: { type: "none" } });
+        s.addText(pt, { x: ax + 0.28, y: py, w: 2.65, h: 0.72, fontSize: 8, color: C.muted, fontFace: "Arial", wrap: true, margin: 0 });
+      });
+    });
+    s.addText(`Source: Discovery conversations with [CHAMPION NAME], [DATE].`, {
+      x: 0.3, y: 5.2, w: 9.4, h: 0.16, fontSize: 7, color: C.mutedDim, italic: true, fontFace: "Arial", margin: 0
+    });
+  }
+
+  // ─── SLIDE 6: Future State ────────────────────────────────────────────────
+  {
+    const s = pres.addSlide();
+    addBase(s, C.green);
+    addTitle(s, `${cName} with Wrike: Future State`);
+
+    const beforeAfter = [
+      { before: "Fragmented tools", beforeDesc: "Manual data assembly across disconnected systems creates reporting delays and blind spots.", after: "Real-time visibility", afterDesc: "Dashboards connected to OKRs give leadership instant status across all teams." },
+      { before: "No single source of truth", beforeDesc: "Each team tracks differently — version conflicts and rework are constant.", after: "Unified platform", afterDesc: "One system of record eliminates duplicated effort and version chaos." },
+      { before: "Reactive decisions", beforeDesc: "Leadership acts on stale data. Issues surface too late to course-correct.", after: "Proactive management", afterDesc: "Predictive insights surface risks early — before they become delays." },
+      { before: "Scale requires headcount", beforeDesc: "Growth means more hires. No efficiency multiplier from existing investment.", after: "Scale without adding headcount", afterDesc: `Automation and templates absorb growth. ${model.lt._fte > 0 ? fmtK(model.lt._fte) + " in FTE costs avoided." : "[X] FTEs avoided annually."}` },
+    ];
+
+    // Column headers
+    s.addShape(pres.shapes.RECTANGLE, { x: 0.3, y: 0.88, w: 4.4, h: 0.3, fill: { color: "3D1212" }, line: { type: "none" } });
+    s.addText("BEFORE WRIKE", { x: 0.3, y: 0.88, w: 4.4, h: 0.3, fontSize: 8, bold: true, color: C.red, fontFace: "Arial", align: "center", valign: "middle", charSpacing: 1.5, margin: 0 });
+    s.addShape(pres.shapes.RECTANGLE, { x: 5.3, y: 0.88, w: 4.4, h: 0.3, fill: { color: "0A2A12" }, line: { type: "none" } });
+    s.addText("AFTER WRIKE", { x: 5.3, y: 0.88, w: 4.4, h: 0.3, fontSize: 8, bold: true, color: C.green, fontFace: "Arial", align: "center", valign: "middle", charSpacing: 1.5, margin: 0 });
+    // Center arrow column
+    s.addShape(pres.shapes.RECTANGLE, { x: 4.7, y: 0.88, w: 0.6, h: 4.37, fill: { color: C.bgMid }, line: { type: "none" } });
+
+    beforeAfter.forEach((row, i) => {
+      const ry = 1.22 + i * 0.98;
+      // Before card
+      s.addShape(pres.shapes.RECTANGLE, { x: 0.3, y: ry, w: 4.35, h: 0.88, fill: { color: C.bgCard }, line: { color: "3D1212", pt: 1 } });
+      s.addText(row.before, { x: 0.44, y: ry + 0.06, w: 4.05, h: 0.22, fontSize: 9.5, bold: true, color: C.red, fontFace: "Arial", margin: 0 });
+      s.addText(row.beforeDesc, { x: 0.44, y: ry + 0.29, w: 4.05, h: 0.54, fontSize: 8, color: C.muted, fontFace: "Arial", wrap: true, margin: 0 });
+      // Arrow
+      s.addText("→", { x: 4.7, y: ry + 0.3, w: 0.6, h: 0.28, fontSize: 14, color: C.teal, fontFace: "Arial", align: "center", margin: 0 });
+      // After card
+      s.addShape(pres.shapes.RECTANGLE, { x: 5.35, y: ry, w: 4.35, h: 0.88, fill: { color: "0A2A1A" }, line: { color: "0A3A1A", pt: 1 } });
+      s.addText(row.after, { x: 5.49, y: ry + 0.06, w: 4.05, h: 0.22, fontSize: 9.5, bold: true, color: C.green, fontFace: "Arial", margin: 0 });
+      s.addText(row.afterDesc, { x: 5.49, y: ry + 0.29, w: 4.05, h: 0.54, fontSize: 8, color: C.muted, fontFace: "Arial", wrap: true, margin: 0 });
+    });
+  }
+
+  // ─── SLIDE 7: Quantifying the Switch ─────────────────────────────────────
+  {
+    const s = pres.addSlide();
+    addBase(s, C.teal);
+    addTitle(s, "Quantifying the Switch to Wrike", `${cName} · ${H}-Year Combined Value`);
+
+    // Hero total value
+    const totalBenefit = model.tb;
+    s.addShape(pres.shapes.RECTANGLE, { x: 0.3, y: 0.88, w: 9.4, h: 0.75, fill: { color: C.bgCard }, line: { color: C.teal, pt: 1 } });
+    s.addText(fmtK(totalBenefit), { x: 0.5, y: 0.9, w: 3.5, h: 0.55, fontSize: 28, bold: true, color: C.teal, fontFace: "Arial", valign: "middle", margin: 0 });
+    s.addText(`Combined value across all drivers supporting ${cName}'s transformation over ${H} years`, {
+      x: 4.0, y: 0.92, w: 5.5, h: 0.5, fontSize: 9, italic: true, color: C.muted, fontFace: "Arial", valign: "middle", margin: 0
+    });
+
+    // Lever cards
+    const leverData = [
+      ...el.map((d, idx) => ({ name: d.name, val: model.lt[d.id] || 0, color: leverColors[idx % 8] })),
+      ...(model.lt._l4 > 0 ? [{ name: "Platform Consolidation", val: model.lt._l4, color: "10B981" }] : []),
+      ...(model.lt._fte > 0 ? [{ name: "FTE Avoidance", val: model.lt._fte, color: "059669" }] : []),
+    ].filter(l => l.val > 0);
+
+    const leverColors8 = ["00E05C", "37CEBA", "FFCF00", "A78BFA", "F97316", "14B8A6", "EC4899", "6366F1"];
+    const cols = Math.min(leverData.length, 4);
+    const rows = Math.ceil(leverData.length / cols);
+    const cardW = (9.4 - (cols - 1) * 0.15) / cols;
+    const cardH = rows === 1 ? 2.8 : (2.8 - 0.15) / rows;
+    const startY = 1.76;
+
+    leverData.forEach((lev, i) => {
+      const col = i % cols;
+      const row = Math.floor(i / cols);
+      const cx = 0.3 + col * (cardW + 0.15);
+      const cy = startY + row * (cardH + 0.15);
+      const lc = leverColors8[i % leverColors8.length];
+
+      s.addShape(pres.shapes.RECTANGLE, { x: cx, y: cy, w: cardW, h: cardH, fill: { color: C.bgCard }, line: { color: C.border, pt: 1 } });
+      s.addShape(pres.shapes.RECTANGLE, { x: cx, y: cy, w: cardW, h: 0.05, fill: { color: lc }, line: { type: "none" } });
+      s.addText(`${i + 1}`, { x: cx + 0.12, y: cy + 0.12, w: 0.28, h: 0.28, fontSize: 10, bold: true, color: lc, fontFace: "Arial", margin: 0 });
+      s.addText(lev.name, { x: cx + 0.12, y: cy + 0.12, w: cardW - 0.24, h: 0.5, fontSize: 9.5, bold: true, color: C.white, fontFace: "Arial", wrap: true, margin: 0 });
+      s.addText(fmtK(lev.val), { x: cx + 0.12, y: cy + cardH - 0.72, w: cardW - 0.24, h: 0.45, fontSize: 22, bold: true, color: lc, fontFace: "Arial", margin: 0 });
+      s.addText(`${H}-year combined value`, { x: cx + 0.12, y: cy + cardH - 0.28, w: cardW - 0.24, h: 0.2, fontSize: 7.5, color: C.mutedDim, fontFace: "Arial", margin: 0 });
+    });
+  }
+
+  // ─── SLIDE 8: Strategic Value Beyond ROI ─────────────────────────────────
+  {
+    const s = pres.addSlide();
+    addBase(s, C.yellow);
+    addTitle(s, "Strategic Value Beyond ROI", "Additional business benefits not captured in the core financial model");
+
+    const stratCards = [
+      { icon: "↑", title: "Revenue Enablement", color: "34D399", items: ["[IMPACT — e.g., $XM revenue at risk annually from campaign delays]", "[How Wrike accelerates revenue — e.g., faster campaign cycles, shorter time-to-market]", "[Quantified estimate or benchmark — e.g., 10–20% improvement in launch velocity]", "[Source or basis for the estimate]"] },
+      { icon: "♻", title: "Customer Retention", color: "60A5FA", items: ["[IMPACT — e.g., $XM annual recurring revenue tied to customer experience quality]", "[How Wrike improves customer-facing outcomes — e.g., on-time delivery, SLA compliance]", "[Quantified risk of the status quo — e.g., X% churn risk]", "[Strategic connection to overall business goals]"] },
+      { icon: "◆", title: "Talent & Scale", color: "A78BFA", items: ["[IMPACT — e.g., [X] FTEs avoided, [Y]% reduction in turnover risk]", "[How Wrike reduces operational strain on teams — e.g., less admin, more strategic work]", "[Talent retention angle — overwork drives attrition in your industry]", "[Scale-without-hiring story]"] },
+    ];
+
+    stratCards.forEach((card, i) => {
+      const cx = 0.3 + i * 3.22;
+      s.addShape(pres.shapes.RECTANGLE, { x: cx, y: 0.95, w: 3.05, h: 4.27, fill: { color: C.bgCard }, line: { color: C.border, pt: 1 } });
+      s.addShape(pres.shapes.RECTANGLE, { x: cx, y: 0.95, w: 3.05, h: 0.05, fill: { color: card.color }, line: { type: "none" } });
+      s.addText(card.title, { x: cx + 0.12, y: 1.08, w: 2.8, h: 0.3, fontSize: 11, bold: true, color: card.color, fontFace: "Arial", margin: 0 });
+      card.items.forEach((item, ii) => {
+        const iy = 1.5 + ii * 0.72;
+        s.addShape(pres.shapes.RECTANGLE, { x: cx + 0.12, y: iy, w: 0.04, h: 0.62, fill: { color: card.color }, line: { type: "none" } });
+        s.addText(item, { x: cx + 0.24, y: iy, w: 2.7, h: 0.65, fontSize: 7.5, color: C.muted, fontFace: "Arial", wrap: true, margin: 0 });
+      });
+    });
+
+    s.addText("Note: Strategic value estimates are directional. Source benchmarks available in appendix.", {
+      x: 0.3, y: 5.22, w: 9.4, h: 0.16, fontSize: 7, italic: true, color: C.mutedDim, fontFace: "Arial", margin: 0
+    });
+  }
+
+  // ─── SLIDE 9: Financial Summary ───────────────────────────────────────────
+  {
+    const s = pres.addSlide();
+    addBase(s, C.green);
+    addTitle(s, "Financial Summary", `${cName} · ${H}-Year Financial Projection`);
+
+    // 4 KPI cards
+    const kpis4Fin = [
+      { label: "NPV", value: fmtK(model.npv), sub: `${H}-yr @ ${pct(g.discountRate || 0.08)}`, color: model.npv >= 0 ? C.green : C.red },
+      { label: "TOTAL ROI", value: pct(model.roi), sub: `${fmtK(model.tb)} benefit vs ${fmtK(model.tc)} cost`, color: model.roi >= 0 ? C.teal : C.red },
+      { label: "PAYBACK PERIOD", value: model.pbm ? model.pbm + " mo" : "N/A", sub: model.pbm ? `~${(model.pbm/12).toFixed(1)} years` : "", color: C.yellow },
+      { label: "COST OF INACTION", value: fmtK(model.coiTotal), sub: `${H}-yr status quo cost`, color: C.red },
+    ];
+    kpis4Fin.forEach((k, i) => addKpiCard(s, 0.3 + i * 2.36, 0.88, 2.2, 0.88, k.label, k.value, k.sub, k.color));
+
+    // Year-by-year table
+    addSectionLabel(s, 0.3, 1.88, 9.4, "Year-by-Year Projection");
+    const yearHeaders = [{ text: "Category", options: { bold: true, color: C.white, fill: { color: C.bgLight } } }];
+    model.years.forEach(y => yearHeaders.push({ text: `Year ${y.year}`, options: { bold: true, color: C.white, fill: { color: C.bgLight }, align: "right" } }));
+    yearHeaders.push({ text: "Total", options: { bold: true, color: C.white, fill: { color: C.bgLight }, align: "right" } });
+
+    const tableRows = [yearHeaders];
+
+    // Costs section header
+    tableRows.push([{ text: "COSTS", options: { bold: true, color: C.red, fill: { color: "2A1010" }, colspan: model.years.length + 2 } }]);
+
+    const costLines = [
+      { label: "Wrike Licenses", key: "wLicCost" },
+      { label: "Professional Services", key: "wProf" },
+      { label: "Migration", key: "wMig" },
+    ].filter(r => model.years.some(y => y[r.key] > 0));
+
+    costLines.forEach(row => {
+      const total = model.years.reduce((a, y) => a + y[row.key], 0);
+      const tr = [{ text: row.label, options: { color: C.muted, fill: { color: C.bgCard } } }];
+      model.years.forEach(y => tr.push({ text: fmt(y[row.key]), options: { align: "right", color: C.red, fill: { color: C.bgCard } } }));
+      tr.push({ text: fmt(total), options: { align: "right", bold: true, color: C.red, fill: { color: C.bgCard } } });
+      tableRows.push(tr);
+    });
+
+    // SKUs
+    if (g.wrikeAdditionalSKUs) {
+      g.wrikeAdditionalSKUs.forEach((sku, si) => {
+        const total = model.years.reduce((a, y) => a + (y.skuByLine[si]?.cost || 0), 0);
+        if (total > 0) {
+          const tr = [{ text: sku.name || `Add-on ${si+1}`, options: { color: C.muted, fill: { color: C.bgCard } } }];
+          model.years.forEach(y => tr.push({ text: fmt(y.skuByLine[si]?.cost || 0), options: { align: "right", color: C.red, fill: { color: C.bgCard } } }));
+          tr.push({ text: fmt(total), options: { align: "right", bold: true, color: C.red, fill: { color: C.bgCard } } });
+          tableRows.push(tr);
+        }
+      });
+    }
+
+    // Total cost row
+    const totalCostRow = [{ text: "Total Investment", options: { bold: true, color: C.red, fill: { color: "2A1010" } } }];
+    model.years.forEach(y => totalCostRow.push({ text: fmt(y.totalCost), options: { align: "right", bold: true, color: C.red, fill: { color: "2A1010" } } }));
+    totalCostRow.push({ text: fmt(model.tc), options: { align: "right", bold: true, color: C.red, fill: { color: "2A1010" } } });
+    tableRows.push(totalCostRow);
+
+    // Benefits section header
+    tableRows.push([{ text: "BENEFITS", options: { bold: true, color: C.green, fill: { color: "0A2A12" }, colspan: model.years.length + 2 } }]);
+
+    el.forEach(d => {
+      const total = model.years.reduce((a, y) => a + (y.lv[d.id] || 0), 0);
+      const tr = [{ text: d.name, options: { color: C.muted, fill: { color: C.bgCard } } }];
+      model.years.forEach(y => tr.push({ text: fmt(y.lv[d.id] || 0), options: { align: "right", color: C.green, fill: { color: C.bgCard } } }));
+      tr.push({ text: fmt(total), options: { align: "right", bold: true, color: C.green, fill: { color: C.bgCard } } });
+      tableRows.push(tr);
+    });
+
+    if (model.lt._l4 > 0) {
+      const tr = [{ text: "Platform Consolidation", options: { color: C.muted, fill: { color: C.bgCard } } }];
+      model.years.forEach(y => tr.push({ text: fmt(y.legacySav), options: { align: "right", color: C.green, fill: { color: C.bgCard } } }));
+      tr.push({ text: fmt(model.lt._l4), options: { align: "right", bold: true, color: C.green, fill: { color: C.bgCard } } });
+      tableRows.push(tr);
+    }
+    if (model.lt._fte > 0) {
+      const tr = [{ text: "FTE Avoidance", options: { color: C.muted, fill: { color: C.bgCard } } }];
+      model.years.forEach(y => tr.push({ text: fmt(y.fteSav), options: { align: "right", color: C.green, fill: { color: C.bgCard } } }));
+      tr.push({ text: fmt(model.lt._fte), options: { align: "right", bold: true, color: C.green, fill: { color: C.bgCard } } });
+      tableRows.push(tr);
+    }
+
+    const totalBenRow = [{ text: "Total Benefit", options: { bold: true, color: C.green, fill: { color: "0A2A12" } } }];
+    model.years.forEach(y => totalBenRow.push({ text: fmt(y.totalBenefit), options: { align: "right", bold: true, color: C.green, fill: { color: "0A2A12" } } }));
+    totalBenRow.push({ text: fmt(model.tb), options: { align: "right", bold: true, color: C.green, fill: { color: "0A2A12" } } });
+    tableRows.push(totalBenRow);
+
+    // Net row
+    const netRow = [{ text: "Net Value", options: { bold: true, color: C.teal, fill: { color: C.bgLight } } }];
+    model.years.forEach(y => {
+      const net = y.totalBenefit - y.totalCost;
+      netRow.push({ text: fmt(net), options: { align: "right", bold: true, color: net >= 0 ? C.green : C.red, fill: { color: C.bgLight } } });
+    });
+    netRow.push({ text: fmt(model.tb - model.tc), options: { align: "right", bold: true, color: (model.tb - model.tc) >= 0 ? C.green : C.red, fill: { color: C.bgLight } } });
+    tableRows.push(netRow);
+
+    const colCount = model.years.length + 2;
+    const catW = 3.2;
+    const dataW = (9.4 - catW) / (colCount - 1);
+    const colW = [catW, ...Array(colCount - 1).fill(dataW)];
+
+    s.addTable(tableRows, {
+      x: 0.3, y: 2.05, w: 9.4,
+      border: { pt: 0.5, color: C.border },
+      colW, fontSize: 7.5, fontFace: "Arial",
+      rowH: 0.22,
+    });
+  }
+
+  // ─── SLIDE 10: Risks & Mitigations ───────────────────────────────────────
+  {
+    const s = pres.addSlide();
+    addBase(s, C.muted);
+    addTitle(s, "Risks & Mitigations", "Common concerns raised by procurement and IT — and how Wrike addresses each");
+
+    s.addShape(pres.shapes.RECTANGLE, { x: 7.2, y: 0.16, w: 2.5, h: 0.22, fill: { color: "2A3F5C" }, line: { type: "none" } });
+    s.addText("OPTIONAL SLIDE", { x: 7.2, y: 0.16, w: 2.5, h: 0.22, fontSize: 7, bold: true, color: C.yellow, fontFace: "Arial", align: "center", charSpacing: 1, margin: 0 });
+
+    const risks = [
+      { title: "Adoption & Change Management", concern: "Teams are accustomed to existing tools. A new platform may face resistance and slow onboarding.", mitigation: "Wrike provides dedicated onboarding, in-app guidance, and a CSM assigned on day one. [X]-month adoption ramp is already modeled conservatively in the financial case." },
+      { title: "Integration Complexity", concern: "Existing systems (ERP, CRM, HRIS) may create technical dependencies that delay go-live.", mitigation: "Wrike Integrate supports 400+ pre-built connectors. PS team scopes integrations during technical discovery — no custom dev required for standard connections." },
+      { title: "Data Migration & Security", concern: "Migrating existing project data securely is a top concern, especially in regulated industries.", mitigation: "Wrike is SOC 2 Type II, ISO 27001, and GDPR compliant. Migration plan co-developed with your team during PS engagement. Sandbox environment provided for validation." },
+      { title: "ROI Realization Timeline", concern: "[PROCUREMENT CONCERN — e.g., past software investments haven't delivered promised ROI.]", mitigation: "[MITIGATION — e.g., Adoption ramp is modeled conservatively. Payback achieved in [X] months based on verified assumptions.]" },
+    ];
+
+    risks.forEach((r, i) => {
+      const col = i % 2;
+      const row = Math.floor(i / 2);
+      const rx = 0.3 + col * 4.85;
+      const ry = 0.95 + row * 2.15;
+      s.addShape(pres.shapes.RECTANGLE, { x: rx, y: ry, w: 4.6, h: 2.0, fill: { color: C.bgCard }, line: { color: C.border, pt: 1 } });
+      s.addText(r.title, { x: rx + 0.15, y: ry + 0.1, w: 4.3, h: 0.25, fontSize: 9.5, bold: true, color: C.white, fontFace: "Arial", margin: 0 });
+      addSectionLabel(s, rx + 0.15, ry + 0.38, 1.2, "Concern:", C.red);
+      s.addText(r.concern, { x: rx + 0.15, y: ry + 0.56, w: 4.3, h: 0.52, fontSize: 7.5, color: C.muted, fontFace: "Arial", wrap: true, margin: 0 });
+      addSectionLabel(s, rx + 0.15, ry + 1.1, 1.5, "Mitigation:", C.green);
+      s.addText(r.mitigation, { x: rx + 0.15, y: ry + 1.28, w: 4.3, h: 0.6, fontSize: 7.5, color: C.muted, fontFace: "Arial", wrap: true, margin: 0 });
+    });
+  }
+
+  // ─── SLIDE 11: Implementation Overview ───────────────────────────────────
+  {
+    const s = pres.addSlide();
+    addBase(s, C.teal);
+    addTitle(s, "Implementation Overview", "From signed contract to full value — your deployment roadmap");
+
+    s.addShape(pres.shapes.RECTANGLE, { x: 7.2, y: 0.16, w: 2.5, h: 0.22, fill: { color: "2A3F5C" }, line: { type: "none" } });
+    s.addText("OPTIONAL SLIDE", { x: 7.2, y: 0.16, w: 2.5, h: 0.22, fontSize: 7, bold: true, color: C.yellow, fontFace: "Arial", align: "center", charSpacing: 1, margin: 0 });
+
+    const phases = [
+      { num: "1", timing: "Weeks 1–4", title: "Kickoff & Configuration", items: ["Project kickoff and stakeholder alignment", "Workspace structure & space configuration", "SSO / SAML and security setup", "Integration requirements finalized"] },
+      { num: "2", timing: "Weeks 5–8", title: "Pilot Deployment", items: ["[X] pilot users onboarded", "Core use case workflows live", "Integration connections tested", "Feedback loop with champion established"] },
+      { num: "3", timing: "Weeks 9–12", title: "Full Rollout", items: ["All [X] licensed users activated", "Training completed for all teams", "Reporting dashboards live", "CSM cadence established"] },
+      { num: "4", timing: "Month 3+", title: "Value Realization", items: ["KPI tracking against baseline", "Quarterly business reviews begin", "[X]-month payback verification", "Expansion planning initiated"] },
+    ];
+    const phaseColors = [C.teal, C.green, C.yellow, "A78BFA"];
+
+    phases.forEach((ph, i) => {
+      const px = 0.3 + i * 2.38;
+      const pc = phaseColors[i];
+      s.addShape(pres.shapes.RECTANGLE, { x: px, y: 0.92, w: 2.2, h: 4.3, fill: { color: C.bgCard }, line: { color: C.border, pt: 1 } });
+      s.addShape(pres.shapes.RECTANGLE, { x: px, y: 0.92, w: 2.2, h: 0.05, fill: { color: pc }, line: { type: "none" } });
+      s.addShape(pres.shapes.OVAL, { x: px + 0.15, y: 1.02, w: 0.36, h: 0.36, fill: { color: pc }, line: { type: "none" } });
+      s.addText(ph.num, { x: px + 0.15, y: 1.02, w: 0.36, h: 0.36, fontSize: 12, bold: true, color: C.bg, fontFace: "Arial", align: "center", valign: "middle", margin: 0 });
+      s.addText(ph.timing, { x: px + 0.6, y: 1.05, w: 1.45, h: 0.18, fontSize: 7.5, color: C.muted, fontFace: "Arial", margin: 0 });
+      s.addText(ph.title, { x: px + 0.15, y: 1.45, w: 1.9, h: 0.36, fontSize: 9.5, bold: true, color: C.white, fontFace: "Arial", wrap: true, margin: 0 });
+      ph.items.forEach((item, ii) => {
+        const iy = 1.9 + ii * 0.56;
+        s.addShape(pres.shapes.OVAL, { x: px + 0.15, y: iy + 0.06, w: 0.08, h: 0.08, fill: { color: pc }, line: { type: "none" } });
+        s.addText(item, { x: px + 0.28, y: iy, w: 1.78, h: 0.5, fontSize: 7.5, color: C.muted, fontFace: "Arial", wrap: true, margin: 0 });
+      });
+    });
+  }
+
+  // ─── SLIDE 12: Next Steps ─────────────────────────────────────────────────
+  {
+    const s = pres.addSlide();
+    addBase(s, C.green);
+    addTitle(s, "Next Steps", `${cName} × Wrike — Proposed path to decision`);
+
+    const steps = [
+      { n: "01", title: "Validate Assumptions", desc: "Schedule 30-minute working session with [CHAMPION] to review value driver inputs and align on key assumptions before presenting to committee.", owner: "[NAME]", target: "[DATE]" },
+      { n: "02", title: "Executive Alignment", desc: "Present business case to [EXECUTIVE SPONSOR] and [DECISION MAKER]. Confirm budget path and identify any remaining approval stakeholders.", owner: "[NAME]", target: "[DATE]" },
+      { n: "03", title: "Technical Discovery", desc: "Wrike Solutions team completes technical scoping: integration requirements, data migration plan, and deployment architecture.", owner: "[NAME]", target: "[DATE]" },
+      { n: "04", title: "Pilot & Decision", desc: "Define pilot scope ([X] users, [TEAM/USE CASE]), success metrics, and timeline. Align on commercial terms and path to full deployment.", owner: "[NAME]", target: "[DATE]" },
+    ];
+    const stepColors = [C.green, C.teal, C.yellow, "A78BFA"];
+
+    steps.forEach((st, i) => {
+      const sy = 0.98 + i * 1.0;
+      const sc2 = stepColors[i];
+      s.addShape(pres.shapes.RECTANGLE, { x: 0.3, y: sy, w: 9.4, h: 0.88, fill: { color: C.bgCard }, line: { color: C.border, pt: 1 } });
+      s.addShape(pres.shapes.RECTANGLE, { x: 0.3, y: sy, w: 0.06, h: 0.88, fill: { color: sc2 }, line: { type: "none" } });
+      s.addText(st.n, { x: 0.44, y: sy + 0.16, w: 0.5, h: 0.5, fontSize: 18, bold: true, color: sc2, fontFace: "Arial", margin: 0 });
+      s.addText(st.title, { x: 1.02, y: sy + 0.1, w: 5.5, h: 0.28, fontSize: 10.5, bold: true, color: C.white, fontFace: "Arial", margin: 0 });
+      s.addText(st.desc, { x: 1.02, y: sy + 0.38, w: 5.9, h: 0.44, fontSize: 8, color: C.muted, fontFace: "Arial", wrap: true, margin: 0 });
+      s.addText(`Owner: ${st.owner}   |   Target: ${st.target}`, { x: 7.1, y: sy + 0.32, w: 2.5, h: 0.24, fontSize: 7.5, color: C.mutedDim, fontFace: "Arial", align: "right", margin: 0 });
+    });
+  }
+
+  // ─── SLIDE 13: Customer Success Stories ──────────────────────────────────
+  {
+    const s = pres.addSlide();
+    addBase(s, C.teal);
+    addTitle(s, "Customer Success Stories", `How organizations similar to ${cName} achieved measurable results with Wrike`);
+
+    s.addShape(pres.shapes.RECTANGLE, { x: 7.2, y: 0.16, w: 2.5, h: 0.22, fill: { color: "2A3F5C" }, line: { type: "none" } });
+    s.addText("OPTIONAL SLIDE", { x: 7.2, y: 0.16, w: 2.5, h: 0.22, fontSize: 7, bold: true, color: C.yellow, fontFace: "Arial", align: "center", charSpacing: 1, margin: 0 });
+
+    const refs = [
+      { co: "[REFERENCE CUSTOMER 1]", industry: "[Industry / Segment]", challenge: "[One sentence describing their situation before Wrike.]", results: ["[Key metric — e.g., 40% reduction in reporting time]", "[Key metric — e.g., $1.2M in avoided headcount costs]", "[Key metric — e.g., 6-month payback period]"], quote: "[Optional direct quote from the customer or case study.]", person: "[NAME], [TITLE]" },
+      { co: "[REFERENCE CUSTOMER 2]", industry: "[Industry / Segment]", challenge: "[One sentence describing their situation before Wrike.]", results: ["[Key metric 1]", "[Key metric 2]", "[Key metric 3]"], quote: "[Optional direct quote.]", person: "[NAME], [TITLE]" },
+    ];
+
+    refs.forEach((ref, i) => {
+      const rx = 0.3 + i * 4.85;
+      s.addShape(pres.shapes.RECTANGLE, { x: rx, y: 0.92, w: 4.6, h: 4.28, fill: { color: C.bgCard }, line: { color: C.border, pt: 1 } });
+      s.addShape(pres.shapes.RECTANGLE, { x: rx, y: 0.92, w: 4.6, h: 0.05, fill: { color: C.teal }, line: { type: "none" } });
+      s.addText(ref.co, { x: rx + 0.15, y: 1.02, w: 4.3, h: 0.26, fontSize: 12, bold: true, color: C.white, fontFace: "Arial", margin: 0 });
+      s.addText(ref.industry, { x: rx + 0.15, y: 1.3, w: 4.3, h: 0.18, fontSize: 8, color: C.teal, fontFace: "Arial", margin: 0 });
+      addSectionLabel(s, rx + 0.15, 1.55, 4.3, "Challenge:", C.muted);
+      s.addText(ref.challenge, { x: rx + 0.15, y: 1.73, w: 4.3, h: 0.3, fontSize: 8, italic: true, color: C.muted, fontFace: "Arial", margin: 0 });
+      addSectionLabel(s, rx + 0.15, 2.1, 4.3, "Results:", C.green);
+      ref.results.forEach((r, ri) => {
+        s.addShape(pres.shapes.OVAL, { x: rx + 0.15, y: 2.32 + ri * 0.32 + 0.05, w: 0.08, h: 0.08, fill: { color: C.green }, line: { type: "none" } });
+        s.addText(r, { x: rx + 0.3, y: 2.32 + ri * 0.32, w: 4.0, h: 0.28, fontSize: 8, color: C.muted, fontFace: "Arial", margin: 0 });
+      });
+      s.addShape(pres.shapes.RECTANGLE, { x: rx + 0.15, y: 3.3, w: 4.3, h: 0.01, fill: { color: C.border }, line: { type: "none" } });
+      s.addText(`"${ref.quote}"`, { x: rx + 0.15, y: 3.38, w: 4.3, h: 0.6, fontSize: 8, italic: true, color: C.mutedDim, fontFace: "Arial", wrap: true, margin: 0 });
+      s.addText(`— ${ref.person}`, { x: rx + 0.15, y: 4.05, w: 4.3, h: 0.18, fontSize: 7.5, color: C.mutedDim, fontFace: "Arial", margin: 0 });
+    });
+  }
+
+  // ─── SLIDE 14: Appendix ───────────────────────────────────────────────────
+  {
+    const s = pres.addSlide();
+    addBase(s, C.mutedDim);
+    addTitle(s, "Appendix");
+
+    const sections = [
+      { letter: "A", title: "Value Model Assumptions", items: ["All lever inputs and formula types", "Adoption ramp methodology", `FTE fully-loaded cost basis: ${fmt(g.fteCost || 0)}/yr`, `Discount rate: ${pct(g.discountRate || 0.08)} · Horizon: ${H} years`] },
+      { letter: "B", title: "Sensitivity Scenarios", items: ["Conservative: lower reduction rates, no FTE avoidance", "Base Case: current model inputs", "Aggressive: full adoption, all levers enabled", "No FTE avoidance scenario"] },
+      { letter: "C", title: "Reference Customers", items: ["Club Car — Manufacturing / PMO", "Johnson & Johnson — Healthcare / PM", "Academy Sports — Retail / Marketing", "Danone — CPG / Cross-functional"] },
+      { letter: "D", title: "Glossary", items: ["NPV: Net Present Value (future cash flows discounted to today)", "ROI: (Total Benefit − Total Cost) / Total Cost", "CoI: Cost of Inaction — status quo cost over model horizon", "Adoption ramp: months before full productivity benefit accrues"] },
+    ];
+
+    sections.forEach((sec, i) => {
+      const col = i % 2;
+      const row = Math.floor(i / 2);
+      const sx = 0.3 + col * 4.85;
+      const sy = 0.88 + row * 2.15;
+      s.addShape(pres.shapes.RECTANGLE, { x: sx, y: sy, w: 4.6, h: 2.02, fill: { color: C.bgCard }, line: { color: C.border, pt: 1 } });
+      s.addShape(pres.shapes.OVAL, { x: sx + 0.15, y: sy + 0.12, w: 0.36, h: 0.36, fill: { color: C.teal }, line: { type: "none" } });
+      s.addText(sec.letter, { x: sx + 0.15, y: sy + 0.12, w: 0.36, h: 0.36, fontSize: 12, bold: true, color: C.bg, fontFace: "Arial", align: "center", valign: "middle", margin: 0 });
+      s.addText(sec.title, { x: sx + 0.62, y: sy + 0.18, w: 3.8, h: 0.26, fontSize: 10, bold: true, color: C.white, fontFace: "Arial", margin: 0 });
+      sec.items.forEach((item, ii) => {
+        s.addShape(pres.shapes.OVAL, { x: sx + 0.22, y: sy + 0.62 + ii * 0.32 + 0.06, w: 0.07, h: 0.07, fill: { color: C.teal }, line: { type: "none" } });
+        s.addText(item, { x: sx + 0.36, y: sy + 0.62 + ii * 0.32, w: 4.1, h: 0.28, fontSize: 7.5, color: C.muted, fontFace: "Arial", margin: 0 });
+      });
+    });
+  }
+
+  // ─── Write file ───────────────────────────────────────────────────────────
+  const fileName = `Wrike_Business_Case${g.customerName ? "_" + g.customerName.replace(/\s+/g, "_") : ""}`;
+  pres.writeFile({ fileName });
 }
 
 /* ── UI ── */
@@ -700,6 +1420,15 @@ function DriverInputs({driver,onChange}){
     case "incident": return(<><BenchmarkBanner/><Inp label={l.people||"People Affected"} value={i.people} onChange={ui("people")} suffix="people" help={h.people}/><Inp label={l.hoursPerIncident||"Hours / Person / Incident"} value={i.hoursPerIncident} onChange={ui("hoursPerIncident")} suffix="hrs" step={0.5} help={h.hoursPerIncident}/><Inp label={l.incidentsPerYear||"Incidents / Year"} value={i.incidentsPerYear} onChange={ui("incidentsPerYear")} help={h.incidentsPerYear}/><Sld label={l.recapture||"Recapture Rate"} value={i.recapture} onChange={ui("recapture")} min={0.05} max={1} step={0.05} format="pct" help={h.recapture}/></>);
     case "risk": return(<><BenchmarkBanner/><Inp label={l.costPerIncident||"Cost Per Incident"} value={i.costPerIncident} onChange={ui("costPerIncident")} prefix="$" help={h.costPerIncident}/><Sld label={l.probCurrent||"Probability Today"} value={i.probCurrent} onChange={ui("probCurrent")} min={0.01} max={0.3} step={0.01} format="pct" help={h.probCurrent}/><Sld label={l.probWrike||"Probability with Wrike"} value={i.probWrike} onChange={ui("probWrike")} min={0} max={0.2} step={0.01} format="pct" help={h.probWrike}/></>);
     case "revenue": return(<><BenchmarkBanner/><Inp label={l.annualValue||"Annual Revenue / Value at Risk"} value={i.annualValue} onChange={ui("annualValue")} prefix="$" help={h.annualValue}/><Sld label={l.improvement||"% Improvement"} value={i.improvement} onChange={ui("improvement")} min={0.01} max={0.5} step={0.01} format="pct" help={h.improvement}/></>);
+    case "project_delay": return(<><BenchmarkBanner/>
+      <Inp label={l.projectsPerYear||"Projects / Year"} value={i.projectsPerYear} onChange={ui("projectsPerYear")} suffix="projects" help={h.projectsPerYear}/>
+      <Sld label={l.delayRate||"% Projects Delayed"} value={i.delayRate} onChange={ui("delayRate")} min={0.05} max={1} step={0.05} format="pct" help={h.delayRate}/>
+      <Inp label={l.avgDelayDays||"Avg Days Late per Delayed Project"} value={i.avgDelayDays} onChange={ui("avgDelayDays")} suffix="days" step={1} help={h.avgDelayDays}/>
+      <Inp label={l.dailyCostOfDelay||"Daily Cost of Delay ($)"} value={i.dailyCostOfDelay} onChange={ui("dailyCostOfDelay")} prefix="$" help={h.dailyCostOfDelay}/>
+      <div style={{background:"#f0f9ff",border:"1px solid #bae6fd",borderRadius:6,padding:"7px 10px",marginBottom:8,fontSize:10,color:"#0369a1"}}>
+        💡 <strong>How to get daily cost:</strong> Ask "If a project launched 2 weeks late, what's the rough business impact?" Then divide by days. Common anchors: extended agency/contractor fees, delayed campaign revenue, missed SLA penalties.
+      </div>
+      <Sld label={l.reductionRate||"% Reduction with Wrike"} value={i.reductionRate} onChange={ui("reductionRate")} min={0.05} max={0.95} step={0.05} format="pct" help={h.reductionRate}/></>);
     default: return null;
   }
 }
@@ -722,7 +1451,7 @@ function EditDriverModal({driver,onSave,onClose,onDelete}){
       <textarea value={d.tip||""} onChange={e=>setD({...d,tip:e.target.value})} rows={2} style={{width:"100%",padding:"8px 10px",border:"1px solid #cbd5e1",borderRadius:6,fontSize:12,outline:"none",resize:"vertical",boxSizing:"border-box"}}/></div>
     <div style={{marginBottom:12}}><label style={{fontSize:11,fontWeight:600,color:"#64748b",display:"block",marginBottom:6}}>Formula Type <span style={{fontWeight:400,color:"#94a3b8",fontSize:10}}>- changing resets inputs</span></label>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:4}}>
-        {FORMULA_TYPES.map(ft=>(<button key={ft.v} onClick={()=>changeType(ft.v)} style={{padding:"6px 8px",border:d.type===ft.v?"2px solid #3b82f6":"1px solid #e2e8f0",borderRadius:6,cursor:"pointer",background:d.type===ft.v?"#eff6ff":"white",textAlign:"left"}}>
+        {FORMULA_TYPES.filter(ft=>ft.v!=="project_delay").map(ft=>(<button key={ft.v} onClick={()=>changeType(ft.v)} style={{padding:"6px 8px",border:d.type===ft.v?"2px solid #3b82f6":"1px solid #e2e8f0",borderRadius:6,cursor:"pointer",background:d.type===ft.v?"#eff6ff":"white",textAlign:"left"}}>
           <div style={{fontSize:11,fontWeight:600,color:"#1e293b"}}>{ft.l}</div><div style={{fontSize:9,color:"#64748b",marginTop:1}}>{ft.d}</div>
         </button>))}
       </div>
@@ -751,7 +1480,7 @@ function DriverLibraryModal({onAdd,onClose,existingIds}){
     <div style={{marginBottom:10}}><label style={{fontSize:11,fontWeight:600,color:"#64748b",display:"block",marginBottom:4}}>Description</label>
       <textarea value={customTip} onChange={e=>setCustomTip(e.target.value)} rows={2} placeholder="What does this driver measure?" style={{width:"100%",padding:"8px 10px",border:"1px solid #cbd5e1",borderRadius:6,fontSize:12,outline:"none",resize:"vertical",boxSizing:"border-box"}}/></div>
     <div style={{marginBottom:14}}><label style={{fontSize:11,fontWeight:600,color:"#64748b",display:"block",marginBottom:6}}>Formula Type</label>
-      {FORMULA_TYPES.map(ft=>(<button key={ft.v} onClick={()=>setCustomType(ft.v)} style={{display:"block",width:"100%",textAlign:"left",padding:"8px 12px",marginBottom:4,border:customType===ft.v?"2px solid #3b82f6":"1px solid #e2e8f0",borderRadius:6,cursor:"pointer",background:customType===ft.v?"#eff6ff":"white"}}>
+      {FORMULA_TYPES.filter(ft=>ft.v!=="project_delay").map(ft=>(<button key={ft.v} onClick={()=>setCustomType(ft.v)} style={{display:"block",width:"100%",textAlign:"left",padding:"8px 12px",marginBottom:4,border:customType===ft.v?"2px solid #3b82f6":"1px solid #e2e8f0",borderRadius:6,cursor:"pointer",background:customType===ft.v?"#eff6ff":"white"}}>
         <div style={{fontSize:12,fontWeight:600,color:"#1e293b"}}>{ft.l}</div><div style={{fontSize:10,color:"#64748b",marginTop:2}}>{ft.d}</div>
       </button>))}</div>
     <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
@@ -930,8 +1659,13 @@ function App(){
     lt._fte=years.reduce((a,y)=>a+y.fteSav,0);
     const lth={};el.forEach(d=>{lth[d.id]=years.reduce((a,y)=>a+(y.lh[d.id]||0),0);});
     const totalHours=el.reduce((a,d)=>a+(lth[d.id]||0),0);
+    const totalProjectDays=el.filter(d=>d.type==="project_delay").reduce((a,d)=>{
+      const i=d.inputs;let days=0;
+      for(let y=1;y<=g.horizon;y++){const af=y===1?Math.max(0,(12-g.adoptionRamp)/12):1;days+=i.projectsPerYear*i.delayRate*i.avgDelayDays*i.reductionRate*af;}
+      return a+days;
+    },0);
     const coiTotal=years.reduce((a,y)=>a+y.coiTotal,0);
-    return{years,npv,tc,tb,roi,pbm,lt,lth,totalHours,coiTotal};
+    return{years,npv,tc,tb,roi,pbm,lt,lth,totalHours,totalProjectDays,coiTotal};
   },[drivers,g]);
 
   const scenarioResults=useMemo(()=>{
@@ -967,7 +1701,15 @@ function App(){
         <div style={{display:"flex",gap:6}}>
           <button onClick={()=>setShowModels(true)} style={{padding:"6px 14px",borderRadius:6,border:"1px solid rgba(255,255,255,0.3)",background:"rgba(255,255,255,0.1)",color:"white",cursor:"pointer",fontSize:11,fontWeight:600}}>My Models</button>
           <button onClick={()=>{saveModel();const url=generateShareURL(drivers,g,kpis,removedKpis);if(url){navigator.clipboard.writeText(url).catch(()=>{});setToast("Saved & link copied!");}else{setToast("Saved!");}}} style={{padding:"6px 14px",borderRadius:6,border:"1px solid rgba(255,255,255,0.3)",background:"rgba(59,130,246,0.4)",color:"white",cursor:"pointer",fontSize:11,fontWeight:600}}>Save & Share</button>
-          <button onClick={()=>exportCSV(model,drivers,g,scenarios,scenarioResults,kpis)} style={{padding:"6px 14px",borderRadius:6,border:"1px solid rgba(255,255,255,0.3)",background:"rgba(255,255,255,0.1)",color:"white",cursor:"pointer",fontSize:11,fontWeight:600}}>Export</button>
+          <div style={{position:"relative"}} onMouseLeave={()=>{const m=document.getElementById("_exportMenu");if(m)m.style.display="none";}}>
+            <button onMouseEnter={()=>{const m=document.getElementById("_exportMenu");if(m)m.style.display="block";}} onClick={()=>{const m=document.getElementById("_exportMenu");if(m)m.style.display=m.style.display==="block"?"none":"block";}} style={{padding:"6px 14px",borderRadius:6,border:"1px solid rgba(255,255,255,0.3)",background:"rgba(255,255,255,0.1)",color:"white",cursor:"pointer",fontSize:11,fontWeight:600,display:"flex",alignItems:"center",gap:5}}>Export <span style={{fontSize:8,opacity:0.7}}>▾</span></button>
+            <div id="_exportMenu" style={{display:"none",position:"absolute",top:"calc(100% + 4px)",right:0,background:"#1e293b",border:"1px solid #334155",borderRadius:8,minWidth:160,boxShadow:"0 8px 24px rgba(0,0,0,0.4)",zIndex:999,overflow:"hidden"}}>
+              <button onClick={()=>{exportCSV(model,drivers,g,scenarios,scenarioResults,kpis);const m=document.getElementById("_exportMenu");if(m)m.style.display="none";}} style={{width:"100%",padding:"9px 14px",border:"none",background:"none",color:"#f1f5f9",cursor:"pointer",fontSize:11,fontWeight:600,textAlign:"left",display:"flex",alignItems:"center",gap:8}} onMouseEnter={e=>e.currentTarget.style.background="#334155"} onMouseLeave={e=>e.currentTarget.style.background="none"}><span style={{fontSize:13}}>📊</span> Excel</button>
+              <button onClick={()=>{exportPPTX(model,drivers,g);const m=document.getElementById("_exportMenu");if(m)m.style.display="none";}} style={{width:"100%",padding:"9px 14px",border:"none",background:"none",color:"#00e05c",cursor:"pointer",fontSize:11,fontWeight:600,textAlign:"left",display:"flex",alignItems:"center",gap:8}} onMouseEnter={e=>e.currentTarget.style.background="#334155"} onMouseLeave={e=>e.currentTarget.style.background="none"}><span style={{fontSize:13}}>📑</span> PowerPoint</button>
+              <div style={{borderTop:"1px solid #334155",margin:"2px 0"}}/>
+              <button disabled title="Coming soon" style={{width:"100%",padding:"9px 14px",border:"none",background:"none",color:"#475569",cursor:"not-allowed",fontSize:11,fontWeight:600,textAlign:"left",display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:13}}>📝</span> Word <span style={{fontSize:9,marginLeft:"auto",color:"#334155"}}>Soon</span></button>
+            </div>
+          </div>
         </div>
       </div>
       <div style={{display:"flex",gap:0,minHeight:"calc(100vh - 60px)"}}>
@@ -1078,7 +1820,8 @@ function App(){
         <div style={{flex:1,padding:"16px 22px",overflowY:"auto",maxHeight:"calc(100vh - 60px)"}}>
           <div style={{display:"flex",gap:8,marginBottom:14,flexWrap:"wrap"}}>
             <Stat label={g.discountEnabled?"NPV":"Net Value"} value={fmtK(model.npv)} color={model.npv>=0?"#059669":"#dc2626"} bg={model.npv>=0?"#ecfdf5":"#fef2f2"} sub={g.discountEnabled?`${g.horizon}yr @ ${pct(g.discountRate)}`:`${g.horizon}yr total`}/>
-            <Stat label="Total Hours Regained" value={fmtHrs(model.totalHours)} color="#7c3aed" bg="#f5f3ff" sub={`${g.horizon}yr time horizon`}/>
+            <Stat label="Total Hours Regained" value={fmtHrs(model.totalHours)} color="#7c3aed" bg="#f5f3ff" sub={`${g.horizon}yr · included in net value`}/>
+            {el.some(d=>d.type==="project_delay")&&<Stat label="Project-Days Saved" value={Math.round(model.totalProjectDays).toLocaleString()+" days"} color="#0ea5e9" bg="#f0f9ff" sub={`${g.horizon}yr · included in net value`}/>}
             <Stat label="Payback" value={model.pbm?`${model.pbm}mo`:"N/A"} color="#1e293b" bg="#f5f3ff" sub={model.pbm?`~${(model.pbm/12).toFixed(1)} years`:""}/>
             <Stat label="Cost of Inaction" value={fmtK(model.coiTotal)} color="#dc2626" bg="#fef2f2" sub={`${g.horizon}yr do-nothing cost`}/>
           </div>
@@ -1155,7 +1898,7 @@ function App(){
                   <td style={{padding:"5px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontWeight:700,borderBottom:"1px solid #f1f5f9",borderLeft:"2px solid #fecaca",color:"#991b1b"}}>{fmt(model.years.reduce((a,y)=>a+y.coiSS,0))}</td>
                 </tr>
                 {/* Per-driver cost of inaction lines */}
-                {el.map(d=>{const total=model.years.reduce((a,y)=>a+(y.coiByDriver[d.id]||0),0);const coiLabel=d.type==="risk"?"compliance risk exposure":d.type==="revenue"?"unrealized revenue":d.type==="incident"?"incident recovery cost":"wasted productivity";return(
+                {el.map(d=>{const total=model.years.reduce((a,y)=>a+(y.coiByDriver[d.id]||0),0);const coiLabel=d.type==="risk"?"compliance risk exposure":d.type==="revenue"?"unrealized revenue":d.type==="incident"?"incident recovery cost":d.type==="project_delay"?"project delay cost":"wasted productivity";return(
                   <tr key={d.id}>
                     <td style={{padding:"5px 10px",color:"#334155",borderBottom:"1px solid #f1f5f9"}}>{d.name} <span style={{fontSize:9,color:"#94a3b8"}}>({coiLabel})</span></td>
                     {model.years.map(y=>(<td key={y.year} style={{padding:"5px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",borderBottom:"1px solid #f1f5f9",color:"#dc2626"}}>{fmt(y.coiByDriver[d.id]||0)}</td>))}
@@ -1267,13 +2010,14 @@ function App(){
                 <div style={{fontSize:10,color:"#94a3b8"}}>{m.date} • {(m.d||[]).length} drivers • {m.g?.horizon||3}yr</div>
               </div>
               <button onClick={()=>loadModel(m)} style={{padding:"6px 12px",borderRadius:6,border:"none",background:"#3b82f6",color:"white",cursor:"pointer",fontSize:11,fontWeight:600}}>Load</button>
+              <button onClick={()=>{const url=generateShareURL(m.d||[],{...DEFAULT_GLOBALS,...(m.g||{})},m.k||[],m.r||{});if(url){navigator.clipboard.writeText(url).catch(()=>{});setToast("Link copied — send to prospect!");setShowModels(false);}else{setToast("Could not generate link.");}}} style={{padding:"6px 12px",borderRadius:6,border:"1px solid rgba(59,130,246,0.4)",background:"rgba(59,130,246,0.1)",color:"#3b82f6",cursor:"pointer",fontSize:11,fontWeight:600}}>Share</button>
               <button onClick={()=>{const data={...m};const blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"});const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=`Wrike_Model_${m.name}.json`;a.click();}} style={{padding:"6px 12px",borderRadius:6,border:"1px solid #cbd5e1",background:"white",cursor:"pointer",fontSize:11,fontWeight:600,color:"#475569"}}>Export</button>
               <button onClick={()=>deleteModel(i)} style={{border:"none",background:"none",cursor:"pointer",fontSize:14,color:"#dc2626"}}>×</button>
             </div>))}
           </div>
         )}
-        <div style={{marginTop:14,padding:"10px",background:"#f8fafc",borderRadius:6,border:"1px solid #e2e8f0",fontSize:10,color:"#64748b",lineHeight:1.5}}>
-          <strong>How it works:</strong> Models are saved in this browser. Use Export/Import JSON to share between team members or back up to Google Drive. The Share button creates a link for prospects.</div>
+        <div style={{marginTop:14,padding:"10px",background:"#f8fafc",borderRadius:6,border:"1px solid #e2e8f0",fontSize:10,color:"#64748b",lineHeight:1.6}}>
+          <strong>Share</strong> — Generates a compressed URL (using LZ-string) you can send directly to a prospect. They open it and see your model with all inputs pre-loaded. <strong>Export JSON</strong> — Downloads the model as a file for backing up to Google Drive or handing off to another rep. <strong>Import JSON</strong> — Loads a previously exported file into this browser. <strong>Backup All</strong> — Downloads every saved model at once.</div>
       </Modal>}
       {/* SHARE MODAL */}
       {shareModal&&<Modal onClose={()=>setShareModal(false)}>
