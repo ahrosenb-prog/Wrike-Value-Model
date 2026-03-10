@@ -63,6 +63,28 @@ const FORMULA_TYPES = [
     labels:{annualValue:"Annual Revenue / Value at Risk",improvement:"% Improvement with Wrike"} },
 ];
 
+/* ═══ INDUSTRY BENCHMARKS ═══ */
+const INDUSTRY_BENCHMARKS = {
+  "lib_report": {benchmark:"8-12 hrs/week",source:"Forrester Research, 2024"},
+  "lib_approval": {benchmark:"4-8 hrs/week",source:"Industry benchmark"},
+  "lib_status": {benchmark:"3-6 hrs/week",source:"IDC Study, 2023"},
+  "lib_search": {benchmark:"2-5 hrs/week",source:"Gartner Study"},
+  "lib_onboard": {benchmark:"80-120 hours",source:"SHRM Study, 2024"},
+  "lib_dupe": {benchmark:"3-8 hrs/week",source:"Forrester"},
+  "lib_triage": {benchmark:"4-10 hrs/week",source:"Tech benchmarks"},
+  "lib_ripple": {benchmark:"2-6 incidents/month",source:"Cloud benchmarks"},
+  "lib_sync": {benchmark:"4-12 hrs/week",source:"Integration study"},
+  "lib_data_risk": {benchmark:"$100K-$500K",source:"NIST, 2024"},
+  "lib_audit": {benchmark:"40-80 hours",source:"SOX benchmarks"},
+  "lib_security": {benchmark:"$500K-$5M",source:"IBM/Ponemon, 2024"},
+  "lib_rework": {benchmark:"5-15 hrs/week",source:"QA benchmarks"},
+  "lib_deadline": {benchmark:"6-12/year",source:"PM study"},
+  "lib_scope": {benchmark:"10-30%",source:"Standish Report"},
+  "lib_ttm": {benchmark:"5-15% reduction",source:"Agile benchmarks"},
+  "lib_retention": {benchmark:"3-8% uplift",source:"Customer study"},
+  "lib_capacity": {benchmark:"15-25% increase",source:"Resource study"},
+};
+
 /* ═══ DRIVER LIBRARY ═══ */
 const DRIVER_LIBRARY = [
   { cat:"Productivity", items:[
@@ -182,8 +204,17 @@ function calcCoi(d, hr) {
     default: return 0;
   }
 }
+function calcDriverHours(d, af) {
+  if (!d.enabled) return 0; const i=d.inputs;
+  switch (d.type) {
+    case "time": return i.people*i.hoursPerCycle*i.cyclesPerYear*i.reduction*af;
+    case "incident": return i.people*i.hoursPerIncident*i.incidentsPerYear*i.recapture*af;
+    default: return 0;
+  }
+}
+const fmtHrs = (n) => { const r=Math.round(n); if(r>=1000) return `${(r/1000).toFixed(1)}K hrs`; return `${r.toLocaleString()} hrs`; };
 
-function exportCSV(model, drivers, g, scenarios, scenarioResults) {
+function exportCSV(model, drivers, g, scenarios, scenarioResults, kpis) {
   if(typeof XLSX==="undefined"){alert("Export requires browser.");return;}
   const CUR=g.currency||"$";const CF=CUR+"#,##0";
   const el=drivers.filter(d=>d.enabled);const hr=g.fteCost/2080;const H=g.horizon;
@@ -269,9 +300,14 @@ function exportCSV(model, drivers, g, scenarios, scenarioResults) {
   aRef.profSvc="Assumptions!$B$"+(r+1);
   sc(ws1,r,0,"Prof Services (Y1)",S.lbl);sc(ws1,r,1,g.wrikeProfServices,S.inp$);r++;
   aRef.migration="Assumptions!$B$"+(r+1);
-  sc(ws1,r,0,"Migration (Y1)",S.lbl);sc(ws1,r,1,g.wrikeMigration,S.inp$);r++;
-  let skuTot=0;
-  g.wrikeAdditionalSKUs.forEach(sku=>{sc(ws1,r,0,sku.name+" (annual)",S.lbl);sc(ws1,r,1,sku.annual||0,S.inp$);skuTot+=(sku.annual||0);r++;});
+  if(g.wrikeMigration>0){sc(ws1,r,0,"Migration (Y1)",S.lbl);sc(ws1,r,1,g.wrikeMigration,S.inp$);r++;}
+  g.wrikeAdditionalSKUs.forEach((sku,si)=>{
+    aRef["sku"+si]="Assumptions!$B$"+(r+1);
+    sc(ws1,r,0,(sku.name||"SKU")+" ("+(sku.oneTime?"one-time Y1":"recurring annual")+")",S.lbl);
+    sc(ws1,r,1,sku.annual||0,S.inp$);
+    sc(ws1,r,2,sku.oneTime?"Applied Year 1 only":"Applied every year",S.note);
+    r++;
+  });
   r++;
   
   sc(ws1,r,0,"SHARED ASSUMPTIONS",S.sec);sc(ws1,r,1,"",S.sec);sc(ws1,r,2,"",S.sec);r++;
@@ -308,23 +344,30 @@ function exportCSV(model, drivers, g, scenarios, scenarioResults) {
   sc(ws2,r,0,"Wrike Licenses",S.lbl);
   for(let i=0;i<H;i++)sf(ws2,r,i+1,"="+aRef["wrikeCost"+i],S.$);
   sf(ws2,r,tCol,"=SUM("+cn(1)+(r+1)+":"+cn(H)+(r+1)+")",S.$);r++;
-  
+
   sc(ws2,r,0,"Prof Services",S.lbl);
   sf(ws2,r,1,"="+aRef.profSvc,S.$);for(let i=1;i<H;i++)sc(ws2,r,i+1,0,S.$);
   sf(ws2,r,tCol,"=SUM("+cn(1)+(r+1)+":"+cn(H)+(r+1)+")",S.$);r++;
-  
-  sc(ws2,r,0,"Migration",S.lbl);
-  sf(ws2,r,1,"="+aRef.migration,S.$);for(let i=1;i<H;i++)sc(ws2,r,i+1,0,S.$);
-  sf(ws2,r,tCol,"=SUM("+cn(1)+(r+1)+":"+cn(H)+(r+1)+")",S.$);r++;
-  
-  sc(ws2,r,0,"Additional SKUs",S.lbl);
-  for(let i=0;i<H;i++)sc(ws2,r,i+1,skuTot,S.$);
-  sf(ws2,r,tCol,"=SUM("+cn(1)+(r+1)+":"+cn(H)+(r+1)+")",S.$);r++;
-  
-  const costTop=r-3;
+
+  if(g.wrikeMigration>0){
+    sc(ws2,r,0,"Migration",S.lbl);
+    sf(ws2,r,1,"="+aRef.migration,S.$);for(let i=1;i<H;i++)sc(ws2,r,i+1,0,S.$);
+    sf(ws2,r,tCol,"=SUM("+cn(1)+(r+1)+":"+cn(H)+(r+1)+")",S.$);r++;
+  }
+
+  g.wrikeAdditionalSKUs.forEach((sku,si)=>{
+    sc(ws2,r,0,(sku.name||"SKU")+" ("+(sku.oneTime?"one-time":"recurring")+")",S.lbl);
+    for(let i=0;i<H;i++){
+      const cost=sku.oneTime?(i===0?sku.annual||0:0):sku.annual||0;
+      sc(ws2,r,i+1,cost,S.$);
+    }
+    sf(ws2,r,tCol,"=SUM("+cn(1)+(r+1)+":"+cn(H)+(r+1)+")",S.$);r++;
+  });
+
+  const costTop=r;
   /* TOTAL COST - highlighted row */
   sc(ws2,r,0,"TOTAL COST",{font:{bold:true,sz:10,color:{rgb:"DC2626"},name:"Arial"},fill:{fgColor:{rgb:"FEF2F2"}}});
-  for(let i=0;i<H;i++)sf(ws2,r,i+1,"=SUM("+cn(i+1)+(costTop+1)+":"+cn(i+1)+r+")",S.totRbg);
+  for(let i=0;i<H;i++)sf(ws2,r,i+1,"=SUM("+cn(i+1)+"4:"+cn(i+1)+r+")",S.totRbg);
   sf(ws2,r,tCol,"=SUM("+cn(1)+(r+1)+":"+cn(H)+(r+1)+")",S.totRbg);
   const tcRow=r;r+=2;
   
@@ -342,9 +385,10 @@ function exportCSV(model, drivers, g, scenarios, scenarioResults) {
   
   /* Driver rows */
   const dRows=[];
+  const hRows=[];
   el.forEach((d,di)=>{
     sc(ws2,r,0,d.name,S.drv(d.color));r++;
-    sc(ws2,r,0,d.name+" Savings",S.lbl);
+    sc(ws2,r,0,d.name+" — Value ($)",S.lbl);
     for(let yi=0;yi<H;yi++){
       const c=yi+1;const af=cn(c)+(afRow+1);const hrc=cn(c)+(hrRow+1);
       let f="";
@@ -356,6 +400,22 @@ function exportCSV(model, drivers, g, scenarios, scenarioResults) {
     }
     sf(ws2,r,tCol,"=SUM("+cn(1)+(r+1)+":"+cn(H)+(r+1)+")",S.tot);
     dRows.push(r);r++;
+
+    /* Hours sub-row — only for time and incident drivers */
+    if(d.type==="time"||d.type==="incident"){
+      const hStyle={font:{sz:10,italic:true,color:{rgb:"7C3AED"},name:"Arial"},numFmt:"#,##0",alignment:{horizontal:"right"}};
+      const hLbl={font:{sz:10,italic:true,color:{rgb:"7C3AED"},name:"Arial"}};
+      sc(ws2,r,0,d.name+" — Hours Saved",hLbl);
+      for(let yi=0;yi<H;yi++){
+        const c=yi+1;const af=cn(c)+(afRow+1);
+        let f="";
+        if(d.type==="time")f="="+aRef["d"+di+"_people"]+"*"+aRef["d"+di+"_hoursPerCycle"]+"*"+aRef["d"+di+"_cyclesPerYear"]+"*"+aRef["d"+di+"_reduction"]+"*"+af;
+        else if(d.type==="incident")f="="+aRef["d"+di+"_people"]+"*"+aRef["d"+di+"_hoursPerIncident"]+"*"+aRef["d"+di+"_incidentsPerYear"]+"*"+aRef["d"+di+"_recapture"]+"*"+af;
+        sf(ws2,r,c,f,hStyle);
+      }
+      sf(ws2,r,tCol,"=SUM("+cn(1)+(r+1)+":"+cn(H)+(r+1)+")",hStyle);
+      hRows.push(r);r++;
+    }
   });
   
   r++;
@@ -372,6 +432,19 @@ function exportCSV(model, drivers, g, scenarios, scenarioResults) {
   for(let i=1;i<H;i++)sf(ws2,r,i+1,"="+aRef.fteAvoided+"*"+aRef.fteCost,S.$);
   sf(ws2,r,tCol,"=SUM("+cn(1)+(r+1)+":"+cn(H)+(r+1)+")",S.tot);
   const feRow=r;r+=2;
+
+  /* TOTAL HOURS REGAINED - purple summary row */
+  if(hRows.length>0){
+    const hrsStyle={font:{bold:true,sz:10,color:{rgb:"7C3AED"},name:"Arial"},numFmt:"#,##0",alignment:{horizontal:"right"},fill:{fgColor:{rgb:"F5F3FF"}}};
+    const hrsLblStyle={font:{bold:true,sz:10,color:{rgb:"7C3AED"},name:"Arial"},fill:{fgColor:{rgb:"F5F3FF"}}};
+    sc(ws2,r,0,"TOTAL HOURS REGAINED",hrsLblStyle);
+    for(let i=0;i<H;i++){
+      const parts=hRows.map(hri=>cn(i+1)+(hri+1));
+      sf(ws2,r,i+1,"="+parts.join("+"),hrsStyle);
+    }
+    sf(ws2,r,tCol,"=SUM("+cn(1)+(r+1)+":"+cn(H)+(r+1)+")",hrsStyle);
+    r+=2;
+  }
   
   /* TOTAL BENEFIT - highlighted */
   sc(ws2,r,0,"TOTAL BENEFIT",{font:{bold:true,sz:10,color:{rgb:"059669"},name:"Arial"},fill:{fgColor:{rgb:"F0FDF4"}}});
@@ -392,8 +465,10 @@ function exportCSV(model, drivers, g, scenarios, scenarioResults) {
   /* SUMMARY */
   sc(ws2,r,0,"SUMMARY",S.sec);sc(ws2,r,1,"",S.sec);r++;
   sc(ws2,r,0,g.discountEnabled?"Net Present Value":"Net Value",S.bold);sc(ws2,r,1,Math.round(model.npv),model.npv>=0?S.tot:S.totR);r++;
-  sc(ws2,r,0,"Total ROI",S.bold);sc(ws2,r,1,model.roi,{font:{bold:true,sz:10,color:{rgb:"059669"},name:"Arial"},numFmt:"0.0%",alignment:{horizontal:"right"}});r++;
-  sc(ws2,r,0,"Payback",S.bold);sc(ws2,r,1,model.pbm?model.pbm+" months":"N/A",S.bold);r++;
+  sc(ws2,r,0,"Cumulative ROI",S.bold);sc(ws2,r,1,model.roi,{font:{bold:true,sz:10,color:{rgb:"0369A1"},name:"Arial"},numFmt:"0.0%",alignment:{horizontal:"right"}});r++;
+  sc(ws2,r,0,"Payback Period",S.bold);sc(ws2,r,1,model.pbm?model.pbm+" months":"N/A",S.bold);r++;
+  sc(ws2,r,0,"Total Hours Regained",S.bold);sc(ws2,r,1,Math.round(model.totalHours),{font:{bold:true,sz:10,color:{rgb:"7C3AED"},name:"Arial"},numFmt:"#,##0",alignment:{horizontal:"right"}});r++;
+  sc(ws2,r,0,"Cost of Inaction ("+H+"yr)",S.bold);sc(ws2,r,1,Math.round(model.coiTotal),S.totR);r++;
   
   ws2["!ref"]="A1:"+cn(tCol)+(r+1);
   XLSX.utils.book_append_sheet(wb,ws2,H+"-Year Model");
@@ -444,18 +519,132 @@ function exportCSV(model, drivers, g, scenarios, scenarioResults) {
   ws3["!ref"]="A1:"+cn(tCol)+(r+1);
   XLSX.utils.book_append_sheet(wb,ws3,"Cost of Inaction");
   
-  /* ═══ TAB 4: SOURCES & KPIs ═══ */
+  /* ═══ TAB 4: PRESALES BASELINE ═══ */
   const ws4={};r=0;
-  ws4["!cols"]=[{wch:42},{wch:45}];
-  sc(ws4,r,0,"SOURCES & POST-IMPLEMENTATION KPIs",S.hdr);sc(ws4,r,1,"",S.hdr);r+=2;
-  sc(ws4,r,0,"RISK BENCHMARK SOURCES",S.sec);sc(ws4,r,1,"",S.sec);r++;
-  [["IBM/Ponemon Cost of a Data Breach 2025","hipaajournal.com"],["HHS OCR Resolution Agreements","hhs.gov"],["HIPAA Violation Penalty Tiers 2025","accountablehq.com"],["Healthcare avg: $7.42M/breach","IBM Security, July 2025"]].forEach(([a,b])=>{sc(ws4,r,0,a,S.lbl);sc(ws4,r,1,b,S.note);r++;});
+
+  /* Column widths: Driver | People | Hrs/Unit | Freq/Yr | Reduction% | Baseline Hrs/Yr | Goal Hrs/Yr | Hrs Saved/Yr | Annual $ Value */
+  ws4["!cols"]=[{wch:32},{wch:10},{wch:13},{wch:12},{wch:14},{wch:18},{wch:16},{wch:16},{wch:16}];
+
+  /* Header */
+  for(let i=0;i<9;i++)sc(ws4,r,i,"",S.hdr);
+  sc(ws4,r,0,"PRESALES AGREED BASELINE — "+( g.customerName||"Customer")+"  ·  "+H+"-Year Horizon",S.hdr);r++;
+  sc(ws4,r,0,"Annual values shown at full adoption. Year 1 actuals reflect the "+g.adoptionRamp+"-month adoption ramp.",{font:{sz:9,italic:true,color:{rgb:"64748B"},name:"Arial"}});r+=2;
+
+  /* Column header styles */
+  const ch={font:{bold:true,sz:10,color:{rgb:"FFFFFF"},name:"Arial"},fill:{fgColor:{rgb:"1E3A5F"}},alignment:{horizontal:"center",wrapText:true}};
+  const chL={font:{bold:true,sz:10,color:{rgb:"FFFFFF"},name:"Arial"},fill:{fgColor:{rgb:"1E3A5F"}},alignment:{horizontal:"left"}};
+  const chHrs={font:{bold:true,sz:10,color:{rgb:"FFFFFF"},name:"Arial"},fill:{fgColor:{rgb:"4C1D95"}},alignment:{horizontal:"center",wrapText:true}};
+  const ch$={font:{bold:true,sz:10,color:{rgb:"FFFFFF"},name:"Arial"},fill:{fgColor:{rgb:"065F46"}},alignment:{horizontal:"center",wrapText:true}};
+
+  sc(ws4,r,0,"Value Driver",chL);
+  sc(ws4,r,1,"People",ch);
+  sc(ws4,r,2,"Hrs / Unit",ch);
+  sc(ws4,r,3,"Units / Yr",ch);
+  sc(ws4,r,4,"Reduction %",ch);
+  sc(ws4,r,5,"Baseline Hrs/Yr (Today)",chHrs);
+  sc(ws4,r,6,"Goal Hrs/Yr (with Wrike)",chHrs);
+  sc(ws4,r,7,"Hrs Saved / Yr",chHrs);
+  sc(ws4,r,8,"Annual $ Value",ch$);
   r++;
-  sc(ws4,r,0,"POST-IMPLEMENTATION KPIs",S.sec);sc(ws4,r,1,"",S.sec);r++;
-  const allKpis=[...new Set(drivers.filter(d=>d.enabled).flatMap(d=>d.kpis||[]))];
-  allKpis.forEach(k=>{sc(ws4,r,0,k,S.lbl);sc(ws4,r,1,"Track quarterly",S.note);r++;});
-  ws4["!ref"]="A1:B"+(r+1);
-  XLSX.utils.book_append_sheet(wb,ws4,"Sources & KPIs");
+
+  /* Row styles */
+  const cellN={font:{sz:10,name:"Arial"},numFmt:"#,##0",alignment:{horizontal:"right"}};
+  const cellP={font:{sz:10,name:"Arial"},numFmt:"0%",alignment:{horizontal:"right"}};
+  const cellHrs={font:{sz:10,color:{rgb:"4C1D95"},name:"Arial"},numFmt:"#,##0",alignment:{horizontal:"right"}};
+  const cellHrsGoal={font:{sz:10,color:{rgb:"7C3AED"},name:"Arial"},numFmt:"#,##0",alignment:{horizontal:"right"}};
+  const cellHrsSaved={font:{bold:true,sz:10,color:{rgb:"7C3AED"},name:"Arial"},numFmt:"#,##0",alignment:{horizontal:"right"}};
+  const cell$={font:{bold:true,sz:10,color:{rgb:"065F46"},name:"Arial"},numFmt:"$#,##0",alignment:{horizontal:"right"}};
+  const cellNA={font:{sz:10,color:{rgb:"94A3B8"},name:"Arial"},alignment:{horizontal:"center"}};
+  const cellLbl=(color)=>({font:{bold:true,sz:10,color:{rgb:color.replace("#","")},name:"Arial"},fill:{fgColor:{rgb:"F8FAFC"}}});
+
+  /* Track totals rows for SUM formulas */
+  const baseHrsRows=[];
+  const goalHrsRows=[];
+  const savedHrsRows=[];
+  const dollarRows=[];
+  const firstDataRow=r;
+
+  el.forEach((d,di)=>{
+    const inp=d.inputs;
+    const rowRef=r+1; // 1-based Excel row
+    const dStyle=cellLbl(d.color);
+
+    sc(ws4,r,0,d.name,dStyle);
+
+    if(d.type==="time"){
+      /* Col B: People */
+      sf(ws4,r,1,"="+aRef["d"+di+"_people"],cellN);
+      /* Col C: Hrs/Cycle */
+      sf(ws4,r,2,"="+aRef["d"+di+"_hoursPerCycle"],cellN);
+      /* Col D: Cycles/Yr */
+      sf(ws4,r,3,"="+aRef["d"+di+"_cyclesPerYear"],cellN);
+      /* Col E: Reduction % */
+      sf(ws4,r,4,"="+aRef["d"+di+"_reduction"],cellP);
+      /* Col F: Baseline Hrs/Yr = People * Hrs * Cycles (no reduction) */
+      sf(ws4,r,5,"=B"+rowRef+"*C"+rowRef+"*D"+rowRef,cellHrs);
+      /* Col G: Goal Hrs/Yr = Baseline * (1 - Reduction) */
+      sf(ws4,r,6,"=F"+rowRef+"*(1-E"+rowRef+")",cellHrsGoal);
+      /* Col H: Hrs Saved = Baseline - Goal */
+      sf(ws4,r,7,"=F"+rowRef+"-G"+rowRef,cellHrsSaved);
+      /* Col I: Annual $ Value = Hrs Saved * Hourly Rate */
+      sf(ws4,r,8,"=H"+rowRef+"*"+aRef.hrRate,cell$);
+      baseHrsRows.push(rowRef);goalHrsRows.push(rowRef);savedHrsRows.push(rowRef);dollarRows.push(rowRef);
+
+    } else if(d.type==="incident"){
+      sf(ws4,r,1,"="+aRef["d"+di+"_people"],cellN);
+      sf(ws4,r,2,"="+aRef["d"+di+"_hoursPerIncident"],cellN);
+      sf(ws4,r,3,"="+aRef["d"+di+"_incidentsPerYear"],cellN);
+      sf(ws4,r,4,"="+aRef["d"+di+"_recapture"],cellP);
+      sf(ws4,r,5,"=B"+rowRef+"*C"+rowRef+"*D"+rowRef,cellHrs);
+      sf(ws4,r,6,"=F"+rowRef+"*(1-E"+rowRef+")",cellHrsGoal);
+      sf(ws4,r,7,"=F"+rowRef+"-G"+rowRef,cellHrsSaved);
+      sf(ws4,r,8,"=H"+rowRef+"*"+aRef.hrRate,cell$);
+      baseHrsRows.push(rowRef);goalHrsRows.push(rowRef);savedHrsRows.push(rowRef);dollarRows.push(rowRef);
+
+    } else if(d.type==="risk"){
+      /* Risk: show cost per incident, current prob, wrike prob — no hours */
+      sf(ws4,r,1,"="+aRef["d"+di+"_costPerIncident"],{font:{sz:10,name:"Arial"},numFmt:"$#,##0",alignment:{horizontal:"right"}});
+      sc(ws4,r,2,"Current Prob →",{font:{sz:9,italic:true,color:{rgb:"94A3B8"},name:"Arial"},alignment:{horizontal:"center"}});
+      sf(ws4,r,3,"="+aRef["d"+di+"_probCurrent"],cellP);
+      sc(ws4,r,4,"Wrike Prob →",{font:{sz:9,italic:true,color:{rgb:"94A3B8"},name:"Arial"},alignment:{horizontal:"center"}});
+      sf(ws4,r,5,"="+aRef["d"+di+"_probWrike"],cellP);
+      sc(ws4,r,6,"—",cellNA);
+      sc(ws4,r,7,"—",cellNA);
+      sf(ws4,r,8,"=("+aRef["d"+di+"_costPerIncident"]+"*"+aRef["d"+di+"_probCurrent"]+")-("+aRef["d"+di+"_costPerIncident"]+"*"+aRef["d"+di+"_probWrike"]+")",cell$);
+      dollarRows.push(rowRef);
+
+    } else if(d.type==="revenue"){
+      sc(ws4,r,1,"Value at Risk →",{font:{sz:9,italic:true,color:{rgb:"94A3B8"},name:"Arial"},alignment:{horizontal:"center"}});
+      sf(ws4,r,2,"="+aRef["d"+di+"_annualValue"],{font:{sz:10,name:"Arial"},numFmt:"$#,##0",alignment:{horizontal:"right"}});
+      sc(ws4,r,3,"Improvement % →",{font:{sz:9,italic:true,color:{rgb:"94A3B8"},name:"Arial"},alignment:{horizontal:"center"}});
+      sf(ws4,r,4,"="+aRef["d"+di+"_improvement"],cellP);
+      sc(ws4,r,5,"—",cellNA);sc(ws4,r,6,"—",cellNA);sc(ws4,r,7,"—",cellNA);
+      sf(ws4,r,8,"="+aRef["d"+di+"_annualValue"]+"*"+aRef["d"+di+"_improvement"],cell$);
+      dollarRows.push(rowRef);
+    }
+    r++;
+  });
+
+  /* Totals row */
+  r++;
+  const totStyle={font:{bold:true,sz:10,color:{rgb:"FFFFFF"},name:"Arial"},fill:{fgColor:{rgb:"1E3A5F"}},numFmt:"#,##0",alignment:{horizontal:"right"}};
+  const totHrsStyle={font:{bold:true,sz:10,color:{rgb:"FFFFFF"},name:"Arial"},fill:{fgColor:{rgb:"4C1D95"}},numFmt:"#,##0",alignment:{horizontal:"right"}};
+  const tot$Style={font:{bold:true,sz:10,color:{rgb:"FFFFFF"},name:"Arial"},fill:{fgColor:{rgb:"065F46"}},numFmt:"$#,##0",alignment:{horizontal:"right"}};
+  const totLblStyle={font:{bold:true,sz:10,color:{rgb:"FFFFFF"},name:"Arial"},fill:{fgColor:{rgb:"1E3A5F"}}};
+  sc(ws4,r,0,"TOTALS",totLblStyle);
+  sc(ws4,r,1,"",totStyle);sc(ws4,r,2,"",totStyle);sc(ws4,r,3,"",totStyle);sc(ws4,r,4,"",totStyle);
+  sf(ws4,r,5,baseHrsRows.length>0?"="+baseHrsRows.map(rx=>"F"+rx).join("+"):"=0",totHrsStyle);
+  sf(ws4,r,6,goalHrsRows.length>0?"="+goalHrsRows.map(rx=>"G"+rx).join("+"):"=0",totHrsStyle);
+  sf(ws4,r,7,savedHrsRows.length>0?"="+savedHrsRows.map(rx=>"H"+rx).join("+"):"=0",totHrsStyle);
+  sf(ws4,r,8,dollarRows.length>0?"="+dollarRows.map(rx=>"I"+rx).join("+"):"=0",tot$Style);
+  r+=2;
+
+  /* Footer */
+  sc(ws4,r,0,"Baseline = current state, no Wrike. Goal = target state after full adoption. Hrs Saved = Baseline − Goal.",{font:{sz:9,italic:true,color:{rgb:"64748B"},name:"Arial"}});r++;
+  sc(ws4,r,0,"This baseline was agreed during presales. Share with Implementation and CSM to establish go-live measurement.",{font:{sz:9,italic:true,color:{rgb:"64748B"},name:"Arial"}});
+
+  ws4["!ref"]="A1:I"+(r+1);
+  XLSX.utils.book_append_sheet(wb,ws4,"Presales Baseline");
   
   XLSX.writeFile(wb,`Wrike_Value_Model${g.customerName?" - "+g.customerName:""}.xlsx`);
 }
@@ -504,35 +693,13 @@ function DriverInputs({driver,onChange}){
   const ui=(f)=>(v)=>onChange({...driver,inputs:{...driver.inputs,[f]:v}});
   const i=driver.inputs,l=driver.labels||{},h=driver.helps||{};
   const ft=FORMULA_TYPES.find(f=>f.v===driver.type);
+  const b=INDUSTRY_BENCHMARKS[driver.id];
+  const BenchmarkBanner=()=>b?<div style={{background:"#dbeafe",border:"1px solid #7dd3fc",borderRadius:6,padding:"8px 10px",marginBottom:10,fontSize:11,fontWeight:600,color:"#0369a1"}}><span>ℹ️ Industry Benchmark: {b.benchmark}</span> <span style={{fontSize:9,color:"#64748b"}}>({b.source})</span></div>:null;
   switch(driver.type){
-    case "time": return(<>
-      <Inp label={l.people||"Team Size"} value={i.people} onChange={ui("people")} suffix="people" help={h.people}/>
-      <Inp label={l.hoursPerCycle||"Hours / Cycle / Person"} value={i.hoursPerCycle} onChange={ui("hoursPerCycle")} suffix="hrs" step={0.5} help={h.hoursPerCycle}/>
-      <div style={{marginBottom:6}}>
-        <div style={{display:"flex",alignItems:"center",marginBottom:2}}><label style={{fontSize:10,fontWeight:600,color:"#64748b"}}>Frequency</label></div>
-        <select value={[52,26,12,4,1].includes(i.cyclesPerYear)?String(i.cyclesPerYear):"custom"} onChange={e=>{const v=e.target.value;if(v==="custom"){ui("cyclesPerYear")(10);return;}ui("cyclesPerYear")(Number(v));}}
-          style={{width:"100%",padding:"5px 8px",border:"1px solid #cbd5e1",borderRadius:5,fontSize:12,color:"#1e293b",background:"#f8fafc",outline:"none",marginBottom:3}}>
-          <option value="52">Weekly (52/yr)</option><option value="26">Bi-weekly (26/yr)</option><option value="12">Monthly (12/yr)</option><option value="4">Quarterly (4/yr)</option><option value="1">Annual (1/yr)</option><option value="custom">Custom</option>
-        </select>
-        {![52,26,12,4,1].includes(i.cyclesPerYear)&&<Inp label="Custom Cycles / Year" value={i.cyclesPerYear} onChange={ui("cyclesPerYear")} min={1}/>}
-      </div>
-      <Sld label={l.reduction||"% Reduction"} value={i.reduction} onChange={ui("reduction")} min={0.05} max={0.95} step={0.05} format="pct" help={h.reduction}/>
-    </>);
-    case "incident": return(<>
-      <Inp label={l.people||"People Affected"} value={i.people} onChange={ui("people")} suffix="people" help={h.people}/>
-      <Inp label={l.hoursPerIncident||"Hours / Person / Incident"} value={i.hoursPerIncident} onChange={ui("hoursPerIncident")} suffix="hrs" step={0.5} help={h.hoursPerIncident}/>
-      <Inp label={l.incidentsPerYear||"Incidents / Year"} value={i.incidentsPerYear} onChange={ui("incidentsPerYear")} help={h.incidentsPerYear}/>
-      <Sld label={l.recapture||"Recapture Rate"} value={i.recapture} onChange={ui("recapture")} min={0.05} max={1} step={0.05} format="pct" help={h.recapture}/>
-    </>);
-    case "risk": return(<>
-      <Inp label={l.costPerIncident||"Cost Per Incident"} value={i.costPerIncident} onChange={ui("costPerIncident")} prefix="$" help={h.costPerIncident}/>
-      <Sld label={l.probCurrent||"Probability Today"} value={i.probCurrent} onChange={ui("probCurrent")} min={0.01} max={0.3} step={0.01} format="pct" help={h.probCurrent}/>
-      <Sld label={l.probWrike||"Probability with Wrike"} value={i.probWrike} onChange={ui("probWrike")} min={0} max={0.2} step={0.01} format="pct" help={h.probWrike}/>
-    </>);
-    case "revenue": return(<>
-      <Inp label={l.annualValue||"Annual Revenue / Value at Risk"} value={i.annualValue} onChange={ui("annualValue")} prefix="$" help={h.annualValue}/>
-      <Sld label={l.improvement||"% Improvement"} value={i.improvement} onChange={ui("improvement")} min={0.01} max={0.5} step={0.01} format="pct" help={h.improvement}/>
-    </>);
+    case "time": return(<><BenchmarkBanner/><Inp label={l.people||"Team Size"} value={i.people} onChange={ui("people")} suffix="people" help={h.people}/><Inp label={l.hoursPerCycle||"Hours / Cycle / Person"} value={i.hoursPerCycle} onChange={ui("hoursPerCycle")} suffix="hrs" step={0.5} help={h.hoursPerCycle}/><div style={{marginBottom:6}}><div style={{display:"flex",alignItems:"center",marginBottom:2}}><label style={{fontSize:10,fontWeight:600,color:"#64748b"}}>Frequency</label></div><select value={[52,26,12,4,1].includes(i.cyclesPerYear)?String(i.cyclesPerYear):"custom"} onChange={e=>{const v=e.target.value;if(v==="custom"){ui("cyclesPerYear")(10);return;}ui("cyclesPerYear")(Number(v));}} style={{width:"100%",padding:"5px 8px",border:"1px solid #cbd5e1",borderRadius:5,fontSize:12,color:"#1e293b",background:"#f8fafc",outline:"none",marginBottom:3}}><option value="52">Weekly (52/yr)</option><option value="26">Bi-weekly (26/yr)</option><option value="12">Monthly (12/yr)</option><option value="4">Quarterly (4/yr)</option><option value="1">Annual (1/yr)</option><option value="custom">Custom</option></select>{![52,26,12,4,1].includes(i.cyclesPerYear)&&<Inp label="Custom Cycles / Year" value={i.cyclesPerYear} onChange={ui("cyclesPerYear")} min={1}/>}</div><Sld label={l.reduction||"% Reduction"} value={i.reduction} onChange={ui("reduction")} min={0.05} max={0.95} step={0.05} format="pct" help={h.reduction}/></>);
+    case "incident": return(<><BenchmarkBanner/><Inp label={l.people||"People Affected"} value={i.people} onChange={ui("people")} suffix="people" help={h.people}/><Inp label={l.hoursPerIncident||"Hours / Person / Incident"} value={i.hoursPerIncident} onChange={ui("hoursPerIncident")} suffix="hrs" step={0.5} help={h.hoursPerIncident}/><Inp label={l.incidentsPerYear||"Incidents / Year"} value={i.incidentsPerYear} onChange={ui("incidentsPerYear")} help={h.incidentsPerYear}/><Sld label={l.recapture||"Recapture Rate"} value={i.recapture} onChange={ui("recapture")} min={0.05} max={1} step={0.05} format="pct" help={h.recapture}/></>);
+    case "risk": return(<><BenchmarkBanner/><Inp label={l.costPerIncident||"Cost Per Incident"} value={i.costPerIncident} onChange={ui("costPerIncident")} prefix="$" help={h.costPerIncident}/><Sld label={l.probCurrent||"Probability Today"} value={i.probCurrent} onChange={ui("probCurrent")} min={0.01} max={0.3} step={0.01} format="pct" help={h.probCurrent}/><Sld label={l.probWrike||"Probability with Wrike"} value={i.probWrike} onChange={ui("probWrike")} min={0} max={0.2} step={0.01} format="pct" help={h.probWrike}/></>);
+    case "revenue": return(<><BenchmarkBanner/><Inp label={l.annualValue||"Annual Revenue / Value at Risk"} value={i.annualValue} onChange={ui("annualValue")} prefix="$" help={h.annualValue}/><Sld label={l.improvement||"% Improvement"} value={i.improvement} onChange={ui("improvement")} min={0.01} max={0.5} step={0.01} format="pct" help={h.improvement}/></>);
     default: return null;
   }
 }
@@ -688,6 +855,7 @@ function App(){
   const[showModels,setShowModels]=useState(false);
   const[savedModels,setSavedModels]=useState(()=>{try{return JSON.parse(localStorage.getItem("wrike_models")||"[]");}catch(e){return[];}});
   const[shareURL,setShareURL]=useState("");
+  const[showHours,setShowHours]=useState(false);
   _cur=g.currency||"$";
   const editMode=true;
   const ug=(k)=>(v)=>setG(p=>({...p,[k]:v}));
@@ -739,28 +907,31 @@ function App(){
     const years=[];const el=drivers.filter(d=>d.enabled);
     for(let y=1;y<=g.horizon;y++){
       const af=y===1?Math.max(0,(12-g.adoptionRamp)/12):1;
-      const lv={};let tlb=0;el.forEach(d=>{const v=calcDriver(d,hr,af);lv[d.id]=v;tlb+=v;});
+      const lv={};const lh={};let tlb=0;el.forEach(d=>{const v=calcDriver(d,hr,af);lv[d.id]=v;tlb+=v;lh[d.id]=calcDriverHours(d,af);});
       const ssSav=g.legacyFullCost-(g.legacyPhaseDown[y-1]||0);
       const fteSav=y===1?(g.fteAvoidY1?g.fteAvoided*g.fteCost*af:0):g.fteAvoided*g.fteCost;
       const legacySav=Math.max(0,ssSav);
       const l4=legacySav+fteSav;
       const wLicCost=g.wrikeCostByYear[y-1]||0;
       const wProf=y===1?g.wrikeProfServices:0;const wMig=y===1?g.wrikeMigration:0;
-      const wSKUs=g.wrikeAdditionalSKUs.reduce((a,s)=>a+(s.annual||0),0);
+      const wSKUs=g.wrikeAdditionalSKUs.reduce((a,s)=>a+(s.oneTime?(y===1?s.annual||0:0):s.annual||0),0);
+      const skuByLine=g.wrikeAdditionalSKUs.map(s=>({name:s.name,cost:s.oneTime?(y===1?s.annual||0:0):s.annual||0}));
       const totalCost=wLicCost+wProf+wMig+wSKUs;const totalBenefit=tlb+l4;const net=totalBenefit-totalCost;
       const df=1/Math.pow(1+dr,y);
       let coiL=0;const coiByDriver={};el.forEach(d=>{const cv=calcCoi(d,hr);coiByDriver[d.id]=cv;coiL+=cv;});
       const coiLegacy=g.legacyFullCost||0;
       const coiTotal=coiLegacy+coiL+(y>1||g.fteAvoidY1?g.fteAvoided*g.fteCost:0);
-      years.push({year:y,af,lv,l4,legacySav,totalCost,totalBenefit,net,df,pvNet:net*df,wLicCost,wProf,wMig,wSKUs,ssSav,fteSav,coiTotal,coiSS:coiLegacy,coiL,coiByDriver,coiFTE:y>1||g.fteAvoidY1?g.fteAvoided*g.fteCost:0});
+      years.push({year:y,af,lv,lh,l4,legacySav,totalCost,totalBenefit,net,df,pvNet:net*df,wLicCost,wProf,wMig,wSKUs,skuByLine,ssSav,fteSav,coiTotal,coiSS:coiLegacy,coiL,coiByDriver,coiFTE:y>1||g.fteAvoidY1?g.fteAvoided*g.fteCost:0});
     }
     const npv=years.reduce((a,y)=>a+y.pvNet,0);const tc=years.reduce((a,y)=>a+y.totalCost,0);const tb=years.reduce((a,y)=>a+y.totalBenefit,0);
     const roi=tc>0?(tb-tc)/tc:0;
     let cum=0,pbm=null;for(const y of years){const mn=y.net/12;for(let m=1;m<=12;m++){cum+=mn;if(cum>=0&&!pbm)pbm=(y.year-1)*12+m;}}
     const lt={};el.forEach(d=>{lt[d.id]=years.reduce((a,y)=>a+(y.lv[d.id]||0),0);});lt._l4=years.reduce((a,y)=>a+y.legacySav,0);
     lt._fte=years.reduce((a,y)=>a+y.fteSav,0);
+    const lth={};el.forEach(d=>{lth[d.id]=years.reduce((a,y)=>a+(y.lh[d.id]||0),0);});
+    const totalHours=el.reduce((a,d)=>a+(lth[d.id]||0),0);
     const coiTotal=years.reduce((a,y)=>a+y.coiTotal,0);
-    return{years,npv,tc,tb,roi,pbm,lt,coiTotal};
+    return{years,npv,tc,tb,roi,pbm,lt,lth,totalHours,coiTotal};
   },[drivers,g]);
 
   const scenarioResults=useMemo(()=>{
@@ -796,7 +967,7 @@ function App(){
         <div style={{display:"flex",gap:6}}>
           <button onClick={()=>setShowModels(true)} style={{padding:"6px 14px",borderRadius:6,border:"1px solid rgba(255,255,255,0.3)",background:"rgba(255,255,255,0.1)",color:"white",cursor:"pointer",fontSize:11,fontWeight:600}}>My Models</button>
           <button onClick={()=>{saveModel();const url=generateShareURL(drivers,g,kpis,removedKpis);if(url){navigator.clipboard.writeText(url).catch(()=>{});setToast("Saved & link copied!");}else{setToast("Saved!");}}} style={{padding:"6px 14px",borderRadius:6,border:"1px solid rgba(255,255,255,0.3)",background:"rgba(59,130,246,0.4)",color:"white",cursor:"pointer",fontSize:11,fontWeight:600}}>Save & Share</button>
-          <button onClick={()=>exportCSV(model,drivers,g,scenarios,scenarioResults)} style={{padding:"6px 14px",borderRadius:6,border:"1px solid rgba(255,255,255,0.3)",background:"rgba(255,255,255,0.1)",color:"white",cursor:"pointer",fontSize:11,fontWeight:600}}>Export</button>
+          <button onClick={()=>exportCSV(model,drivers,g,scenarios,scenarioResults,kpis)} style={{padding:"6px 14px",borderRadius:6,border:"1px solid rgba(255,255,255,0.3)",background:"rgba(255,255,255,0.1)",color:"white",cursor:"pointer",fontSize:11,fontWeight:600}}>Export</button>
         </div>
       </div>
       <div style={{display:"flex",gap:0,minHeight:"calc(100vh - 60px)"}}>
@@ -883,15 +1054,20 @@ function App(){
               <div style={{fontSize:10,fontWeight:600,color:"#3b82f6",marginBottom:4}}>Annual License Cost <Tip text="Enter the actual Wrike license cost per year from your contract or quote. If flat-rate bundled, enter the total. If per-user, calculate seats × rate."/></div>
               {Array.from({length:g.horizon},(_,i)=>(<Inp key={i} label={`Year ${i+1} Wrike License`} value={g.wrikeCostByYear[i]||0} onChange={v=>setWrikeCost(i,v)} prefix={g.currency}/>))}
               <Inp label="Prof Services" value={g.wrikeProfServices} onChange={ug("wrikeProfServices")} prefix={g.currency} help="One-time professional services (Y1 only)."/>
-              <div style={{fontSize:10,fontWeight:600,color:"#3b82f6",marginTop:6,marginBottom:4}}>Additional SKUs <Tip text="Wrike Lock, Wrike Integrate, or other add-on products. Added to every year's cost."/></div>
-              {g.wrikeAdditionalSKUs.map((sku,idx)=>(<div key={idx} style={{display:"flex",gap:4,alignItems:"center",marginBottom:4}}>
-                <input value={sku.name} onChange={e=>{const a=[...g.wrikeAdditionalSKUs];a[idx]={...a[idx],name:e.target.value};setG(p=>({...p,wrikeAdditionalSKUs:a}));}} placeholder="SKU name" style={{flex:1,padding:"4px 6px",border:"1px solid #cbd5e1",borderRadius:4,fontSize:11,outline:"none"}}/>
-                <span style={{fontSize:11,color:"#475569"}}>{g.currency}</span>
-                <input type="number" value={sku.annual} onChange={e=>{const a=[...g.wrikeAdditionalSKUs];a[idx]={...a[idx],annual:Number(e.target.value)};setG(p=>({...p,wrikeAdditionalSKUs:a}));}} style={{width:80,padding:"4px 6px",border:"1px solid #cbd5e1",borderRadius:4,fontSize:11,fontFamily:"'JetBrains Mono',monospace",outline:"none"}}/>
-                <span style={{fontSize:9,color:"#94a3b8"}}>/yr</span>
-                <button onClick={()=>{const a=[...g.wrikeAdditionalSKUs];a.splice(idx,1);setG(p=>({...p,wrikeAdditionalSKUs:a}));}} style={{border:"none",background:"none",cursor:"pointer",fontSize:14,color:"#dc2626",padding:"0 2px"}}>{"×"}</button>
+              <div style={{fontSize:10,fontWeight:600,color:"#3b82f6",marginTop:6,marginBottom:4}}>Additional SKUs <Tip text="Wrike Lock, Wrike Integrate, or other add-on products. Toggle whether each is a one-time (Y1 only) or recurring annual cost."/></div>
+              {g.wrikeAdditionalSKUs.map((sku,idx)=>(<div key={idx} style={{marginBottom:6,padding:"6px 8px",background:"#f8fafc",borderRadius:5,border:"1px solid #e2e8f0"}}>
+                <div style={{display:"flex",gap:4,alignItems:"center",marginBottom:4}}>
+                  <input value={sku.name} onChange={e=>{const a=[...g.wrikeAdditionalSKUs];a[idx]={...a[idx],name:e.target.value};setG(p=>({...p,wrikeAdditionalSKUs:a}));}} placeholder="SKU name" style={{flex:1,padding:"4px 6px",border:"1px solid #cbd5e1",borderRadius:4,fontSize:11,outline:"none"}}/>
+                  <span style={{fontSize:11,color:"#475569"}}>{g.currency}</span>
+                  <input type="number" value={sku.annual} onChange={e=>{const a=[...g.wrikeAdditionalSKUs];a[idx]={...a[idx],annual:Number(e.target.value)};setG(p=>({...p,wrikeAdditionalSKUs:a}));}} style={{width:80,padding:"4px 6px",border:"1px solid #cbd5e1",borderRadius:4,fontSize:11,fontFamily:"'JetBrains Mono',monospace",outline:"none"}}/>
+                  <button onClick={()=>{const a=[...g.wrikeAdditionalSKUs];a.splice(idx,1);setG(p=>({...p,wrikeAdditionalSKUs:a}));}} style={{border:"none",background:"none",cursor:"pointer",fontSize:14,color:"#dc2626",padding:"0 2px"}}>{"×"}</button>
+                </div>
+                <div style={{display:"flex",gap:3,background:"#e2e8f0",borderRadius:4,padding:2,width:"fit-content"}}>
+                  <button onClick={()=>{const a=[...g.wrikeAdditionalSKUs];a[idx]={...a[idx],oneTime:false};setG(p=>({...p,wrikeAdditionalSKUs:a}));}} style={{padding:"2px 8px",borderRadius:3,border:"none",cursor:"pointer",fontSize:9,fontWeight:600,background:!sku.oneTime?"white":"transparent",color:!sku.oneTime?"#3b82f6":"#94a3b8",boxShadow:!sku.oneTime?"0 1px 2px rgba(0,0,0,0.1)":"none"}}>Recurring</button>
+                  <button onClick={()=>{const a=[...g.wrikeAdditionalSKUs];a[idx]={...a[idx],oneTime:true};setG(p=>({...p,wrikeAdditionalSKUs:a}));}} style={{padding:"2px 8px",borderRadius:3,border:"none",cursor:"pointer",fontSize:9,fontWeight:600,background:sku.oneTime?"white":"transparent",color:sku.oneTime?"#f59e0b":"#94a3b8",boxShadow:sku.oneTime?"0 1px 2px rgba(0,0,0,0.1)":"none"}}>One-Time (Y1)</button>
+                </div>
               </div>))}
-              <button onClick={()=>setG(p=>({...p,wrikeAdditionalSKUs:[...p.wrikeAdditionalSKUs,{name:"",annual:0}]}))} style={{fontSize:10,color:"#3b82f6",background:"none",border:"none",cursor:"pointer",fontWeight:600,padding:"2px 0"}}>+ Add SKU</button>
+              <button onClick={()=>setG(p=>({...p,wrikeAdditionalSKUs:[...p.wrikeAdditionalSKUs,{name:"",annual:0,oneTime:false}]}))} style={{fontSize:10,color:"#3b82f6",background:"none",border:"none",cursor:"pointer",fontWeight:600,padding:"2px 0"}}>+ Add SKU</button>
             </>)}
           </div>
         </div>}
@@ -902,7 +1078,7 @@ function App(){
         <div style={{flex:1,padding:"16px 22px",overflowY:"auto",maxHeight:"calc(100vh - 60px)"}}>
           <div style={{display:"flex",gap:8,marginBottom:14,flexWrap:"wrap"}}>
             <Stat label={g.discountEnabled?"NPV":"Net Value"} value={fmtK(model.npv)} color={model.npv>=0?"#059669":"#dc2626"} bg={model.npv>=0?"#ecfdf5":"#fef2f2"} sub={g.discountEnabled?`${g.horizon}yr @ ${pct(g.discountRate)}`:`${g.horizon}yr total`}/>
-            <Stat label="Total ROI" value={pct(model.roi)} color={model.roi>=0?"#059669":"#dc2626"} bg="#f0f9ff" sub={`${fmtK(model.tb)} benefit`}/>
+            <Stat label="Total Hours Regained" value={fmtHrs(model.totalHours)} color="#7c3aed" bg="#f5f3ff" sub={`${g.horizon}yr time horizon`}/>
             <Stat label="Payback" value={model.pbm?`${model.pbm}mo`:"N/A"} color="#1e293b" bg="#f5f3ff" sub={model.pbm?`~${(model.pbm/12).toFixed(1)} years`:""}/>
             <Stat label="Cost of Inaction" value={fmtK(model.coiTotal)} color="#dc2626" bg="#fef2f2" sub={`${g.horizon}yr do-nothing cost`}/>
           </div>
@@ -915,25 +1091,34 @@ function App(){
             <div style={{fontSize:13,fontWeight:600,color:"#64748b",marginBottom:8}}>Add value drivers to see results</div>
             <button onClick={()=>setShowLibrary(true)} style={{padding:"8px 16px",border:"none",borderRadius:6,background:"#3b82f6",color:"white",cursor:"pointer",fontSize:12,fontWeight:600}}>+ Add Value Drivers</button></div>):(<>
             <div style={{background:"#f8fafc",borderRadius:8,padding:"14px 16px",border:"1px solid #e2e8f0",marginBottom:14}}>
-              <div style={{fontSize:12,fontWeight:700,color:"#334155",marginBottom:10}}>{g.horizon}-Year Value by Driver</div>
-              {el.map(d=>{const v=model.lt[d.id]||0;const w=maxLev>0?Math.max(3,(v/maxLev)*100):0;return(
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                <div style={{fontSize:12,fontWeight:700,color:"#334155"}}>{g.horizon}-Year Value by Driver</div>
+                {el.some(d=>d.type==="time"||d.type==="incident")&&(
+                  <div style={{display:"flex",background:"#e2e8f0",borderRadius:5,padding:2,gap:1}}>
+                    <button onClick={()=>setShowHours(false)} style={{padding:"3px 9px",borderRadius:4,border:"none",cursor:"pointer",fontSize:10,fontWeight:600,background:!showHours?"white":"transparent",color:!showHours?"#059669":"#94a3b8",boxShadow:!showHours?"0 1px 2px rgba(0,0,0,0.1)":"none",transition:"all 0.15s"}}>$</button>
+                    <button onClick={()=>setShowHours(true)} style={{padding:"3px 9px",borderRadius:4,border:"none",cursor:"pointer",fontSize:10,fontWeight:600,background:showHours?"white":"transparent",color:showHours?"#7c3aed":"#94a3b8",boxShadow:showHours?"0 1px 2px rgba(0,0,0,0.1)":"none",transition:"all 0.15s"}}>hrs</button>
+                  </div>
+                )}
+              </div>
+              {el.map(d=>{const v=model.lt[d.id]||0;const h=model.lth[d.id]||0;const hasHours=(d.type==="time"||d.type==="incident");const displayVal=showHours&&hasHours?h:v;const allVals=el.map(d2=>showHours&&(d2.type==="time"||d2.type==="incident")?model.lth[d2.id]||0:model.lt[d2.id]||0);const maxVal=Math.max(...allVals,model.lt._l4||0,model.lt._fte||0);const w=maxVal>0?Math.max(3,(displayVal/maxVal)*100):0;return(
                 <div key={d.id} style={{marginBottom:7}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:2}}>
                     <div style={{display:"flex",alignItems:"center"}}><span style={{fontSize:11,color:"#334155",fontWeight:500}}>{d.name}</span><Tip text={d.tip}/></div>
-                    <span style={{fontSize:12,fontWeight:700,color:d.color,fontFamily:"'JetBrains Mono',monospace"}}>{fmtK(v)}</span></div>
-                  <div style={{height:7,background:"#f1f5f9",borderRadius:4,overflow:"hidden"}}><div style={{height:"100%",width:`${w}%`,background:d.color,borderRadius:4,transition:"width 0.4s"}}/></div>
+                    <span style={{fontSize:12,fontWeight:700,color:showHours&&hasHours?"#7c3aed":d.color,fontFamily:"'JetBrains Mono',monospace"}}>{showHours&&hasHours?fmtHrs(h):fmtK(v)}</span>
+                  </div>
+                  <div style={{height:7,background:"#f1f5f9",borderRadius:4,overflow:"hidden"}}><div style={{height:"100%",width:`${w}%`,background:showHours&&hasHours?"#7c3aed":d.color,borderRadius:4,transition:"width 0.4s"}}/></div>
                 </div>);})}
-              <div style={{marginBottom:7}}>
+              <div style={{marginBottom:7,opacity:showHours?0.4:1}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:2}}>
                   <span style={{fontSize:11,color:"#334155",fontWeight:500}}>Legacy Tool(s) Savings</span>
                   <span style={{fontSize:12,fontWeight:700,color:"#10b981",fontFamily:"'JetBrains Mono',monospace"}}>{fmtK(model.lt._l4)}</span></div>
-                <div style={{height:7,background:"#f1f5f9",borderRadius:4,overflow:"hidden"}}><div style={{height:"100%",width:`${maxLev>0?Math.max(3,(model.lt._l4/maxLev)*100):0}%`,background:"#10b981",borderRadius:4,transition:"width 0.4s"}}/></div>
+                <div style={{height:7,background:"#f1f5f9",borderRadius:4,overflow:"hidden"}}><div style={{height:"100%",width:`${!showHours&&maxLev>0?Math.max(3,(model.lt._l4/maxLev)*100):0}%`,background:"#10b981",borderRadius:4,transition:"width 0.4s"}}/></div>
               </div>
-              <div style={{marginBottom:7}}>
+              <div style={{marginBottom:7,opacity:showHours?0.4:1}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:2}}>
                   <span style={{fontSize:11,color:"#334155",fontWeight:500}}>FTE Avoidance</span>
                   <span style={{fontSize:12,fontWeight:700,color:"#059669",fontFamily:"'JetBrains Mono',monospace"}}>{fmtK(model.lt._fte)}</span></div>
-                <div style={{height:7,background:"#f1f5f9",borderRadius:4,overflow:"hidden"}}><div style={{height:"100%",width:`${maxLev>0?Math.max(3,(model.lt._fte/maxLev)*100):0}%`,background:"#059669",borderRadius:4,transition:"width 0.4s"}}/></div>
+                <div style={{height:7,background:"#f1f5f9",borderRadius:4,overflow:"hidden"}}><div style={{height:"100%",width:`${!showHours&&maxLev>0?Math.max(3,(model.lt._fte/maxLev)*100):0}%`,background:"#059669",borderRadius:4,transition:"width 0.4s"}}/></div>
               </div>
             </div>
             <div style={{background:"#f8fafc",borderRadius:8,padding:"14px 16px",border:"1px solid #e2e8f0"}}>
@@ -1005,19 +1190,30 @@ function App(){
               </tr></thead>
               <tbody>
                 <tr><td colSpan={model.years.length+2} style={{padding:"8px 10px 3px",fontWeight:800,fontSize:9,color:"#dc2626",textTransform:"uppercase",borderBottom:"1px solid #e2e8f0"}}>COSTS</td></tr>
-                {[{l:"Wrike Licenses",k:"wLicCost"},{l:"Prof Services",k:"wProf"},{l:"Migration",k:"wMig"},{l:"Additional SKUs",k:"wSKUs"},{l:"Total Cost",k:"totalCost",b:true}].map((row,i)=>{
-                  const total=model.years.reduce((a,y)=>a+y[row.k],0);return(<tr key={`c${i}`} style={{background:row.b?"#fef2f2":"transparent"}}>
-                    <td style={{padding:"4px 10px",fontWeight:row.b?700:400,color:row.b?"#dc2626":"#334155",borderBottom:"1px solid #f1f5f9",fontSize:10}}>{row.l}</td>
-                    {model.years.map(y=>(<td key={y.year} style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,fontWeight:row.b?700:400,borderBottom:"1px solid #f1f5f9",color:"#dc2626"}}>{fmt(y[row.k])}</td>))}
+                {[{l:"Wrike Licenses",k:"wLicCost"},{l:"Prof Services",k:"wProf"},{l:"Migration",k:"wMig"}].filter(row=>model.years.some(y=>y[row.k]>0)).map((row,i)=>{
+                  const total=model.years.reduce((a,y)=>a+y[row.k],0);return(<tr key={`c${i}`}>
+                    <td style={{padding:"4px 10px",color:"#334155",borderBottom:"1px solid #f1f5f9",fontSize:10}}>{row.l}</td>
+                    {model.years.map(y=>(<td key={y.year} style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,borderBottom:"1px solid #f1f5f9",color:"#dc2626"}}>{fmt(y[row.k])}</td>))}
                     <td style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",borderLeft:"2px solid #e2e8f0",color:"#dc2626"}}>{fmt(total)}</td>
                   </tr>);})}
-                <tr><td colSpan={model.years.length+2} style={{padding:"8px 10px 3px",fontWeight:800,fontSize:9,color:"#059669",textTransform:"uppercase",borderBottom:"1px solid #e2e8f0"}}>BENEFITS</td></tr>
+                {g.wrikeAdditionalSKUs.map((sku,si)=>{const total=model.years.reduce((a,y)=>a+(y.skuByLine[si]?.cost||0),0);return(<tr key={`sku${si}`}>
+                    <td style={{padding:"4px 10px",color:"#334155",borderBottom:"1px solid #f1f5f9",fontSize:10}}>{sku.name||"Unnamed SKU"} <span style={{fontSize:9,color:"#94a3b8"}}>({sku.oneTime?"one-time":"recurring"})</span></td>
+                    {model.years.map(y=>(<td key={y.year} style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,borderBottom:"1px solid #f1f5f9",color:"#dc2626"}}>{fmt(y.skuByLine[si]?.cost||0)}</td>))}
+                    <td style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",borderLeft:"2px solid #e2e8f0",color:"#dc2626"}}>{fmt(total)}</td>
+                  </tr>);})}
+                {(()=>{const total=model.years.reduce((a,y)=>a+y.totalCost,0);return(<tr style={{background:"#fef2f2"}}>
+                    <td style={{padding:"4px 10px",fontWeight:700,color:"#dc2626",borderBottom:"1px solid #f1f5f9",fontSize:10}}>Total Cost</td>
+                    {model.years.map(y=>(<td key={y.year} style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",color:"#dc2626"}}>{fmt(y.totalCost)}</td>))}
+                    <td style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",borderLeft:"2px solid #e2e8f0",color:"#dc2626"}}>{fmt(total)}</td>
+                  </tr>);})()}                <tr><td colSpan={model.years.length+2} style={{padding:"8px 10px 3px",fontWeight:800,fontSize:9,color:"#059669",textTransform:"uppercase",borderBottom:"1px solid #e2e8f0"}}>BENEFITS</td></tr>
                 {el.map(d=>{const total=model.years.reduce((a,y)=>a+(y.lv[d.id]||0),0);return(<tr key={d.id}><td style={{padding:"4px 10px",color:"#334155",borderBottom:"1px solid #f1f5f9",fontSize:10}}>{d.name}</td>{model.years.map(y=>(<td key={y.year} style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,borderBottom:"1px solid #f1f5f9"}}>{fmt(y.lv[d.id]||0)}</td>))}<td style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",borderLeft:"2px solid #e2e8f0"}}>{fmt(total)}</td></tr>);})}
                 <tr><td style={{padding:"4px 10px",color:"#334155",borderBottom:"1px solid #f1f5f9",fontSize:10}}>Legacy Tool(s) Savings</td>{model.years.map(y=>(<td key={y.year} style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,borderBottom:"1px solid #f1f5f9"}}>{fmt(y.legacySav)}</td>))}<td style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",borderLeft:"2px solid #e2e8f0"}}>{fmt(model.lt._l4)}</td></tr>
                 <tr><td style={{padding:"4px 10px",color:"#334155",borderBottom:"1px solid #f1f5f9",fontSize:10}}>FTE Avoidance</td>{model.years.map(y=>(<td key={y.year} style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,borderBottom:"1px solid #f1f5f9"}}>{fmt(y.fteSav)}</td>))}<td style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",borderLeft:"2px solid #e2e8f0"}}>{fmt(model.lt._fte)}</td></tr>
                 <tr style={{background:"#f0fdf4"}}><td style={{padding:"4px 10px",fontWeight:700,color:"#059669",borderBottom:"1px solid #f1f5f9",fontSize:10}}>Total Benefit</td>{model.years.map(y=>(<td key={y.year} style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",color:"#059669"}}>{fmt(y.totalBenefit)}</td>))}<td style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",borderLeft:"2px solid #e2e8f0",color:"#059669"}}>{fmt(model.years.reduce((a,y)=>a+y.totalBenefit,0))}</td></tr>
                 <tr><td colSpan={model.years.length+2} style={{padding:"8px 10px 3px",fontWeight:800,fontSize:9,color:"#1e3a5f",textTransform:"uppercase",borderBottom:"1px solid #e2e8f0"}}>NET</td></tr>
                 {[{l:"Net Benefit",k:"net"},...(g.discountEnabled?[{l:"PV Net Benefit",k:"pvNet"}]:[])].map((row,i)=>{const total=model.years.reduce((a,y)=>a+y[row.k],0);return(<tr key={`n${i}`}><td style={{padding:"4px 10px",fontWeight:700,borderBottom:"1px solid #f1f5f9",fontSize:10}}>{row.l}</td>{model.years.map(y=>(<td key={y.year} style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",color:y[row.k]>=0?"#059669":"#dc2626"}}>{fmt(y[row.k])}</td>))}<td style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",borderLeft:"2px solid #e2e8f0",color:total>=0?"#059669":"#dc2626"}}>{fmt(total)}</td></tr>);})}
+                <tr style={{background:"#f0f9ff"}}><td style={{padding:"4px 10px",fontWeight:700,color:"#0369a1",borderBottom:"1px solid #f1f5f9",fontSize:10}}>Cumulative ROI</td>{model.years.map((y,i)=>{const cumCost=model.years.slice(0,i+1).reduce((a,yr)=>a+yr.totalCost,0);const cumBen=model.years.slice(0,i+1).reduce((a,yr)=>a+yr.totalBenefit,0);const cumRoi=cumCost>0?(cumBen-cumCost)/cumCost:0;return(<td key={y.year} style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",color:cumRoi>=0?"#0369a1":"#dc2626"}}>{pct(cumRoi)}</td>);})}<td style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",borderLeft:"2px solid #e2e8f0",color:model.roi>=0?"#0369a1":"#dc2626"}}>{pct(model.roi)}</td></tr>
+                <tr style={{background:"#f5f3ff"}}><td style={{padding:"4px 10px",fontWeight:700,color:"#7c3aed",borderBottom:"1px solid #f1f5f9",fontSize:10}}>Payback Period</td>{model.years.map((y,i)=>{const reached=model.pbm&&model.pbm<=(y.year*12);const thisYr=model.pbm&&model.pbm>(( y.year-1)*12)&&model.pbm<=(y.year*12);return(<td key={y.year} style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,fontWeight:thisYr?700:400,borderBottom:"1px solid #f1f5f9",color:thisYr?"#7c3aed":reached?"#a78bfa":"#94a3b8"}}>{thisYr?`Mo ${model.pbm} ✓`:reached?"achieved":"—"}</td>);})}<td style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",borderLeft:"2px solid #e2e8f0",color:"#7c3aed"}}>{model.pbm?`${model.pbm} months`:"N/A"}</td></tr>
               </tbody>
             </table></div>)}
 
