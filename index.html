@@ -17,6 +17,7 @@
 <script src="https://cdn.jsdelivr.net/npm/lz-string@1.5.0/libs/lz-string.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/pptxgenjs@3.12.0/dist/pptxgen.bundle.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/docx@9.5.3/build/index.umd.js"></script>
 </head>
 <body>
 <div id="root"></div>
@@ -702,6 +703,699 @@ function exportCSV(model, drivers, g, scenarios, scenarioResults, kpis) {
   XLSX.utils.book_append_sheet(wb,ws4,"Presales Baseline");
   
   XLSX.writeFile(wb,`Wrike_Value_Model${g.customerName?" - "+g.customerName:""}.xlsx`);
+}
+
+/* ── Word Export ── */
+async function exportWord(model, drivers, g) {
+  if (typeof docx === "undefined") { alert("Word export requires browser with CDN access."); return; }
+
+  const {
+    Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
+    Header, Footer, AlignmentType, HeadingLevel, BorderStyle, WidthType,
+    ShadingType, VerticalAlign, PageBreak, LevelFormat, ImageRun
+  } = docx;
+
+  // ── Constants ────────────────────────────────────────────────────────────
+  const el      = drivers.filter(d => d.enabled);
+  const H       = g.horizon;
+  const cName   = g.customerName || "[CUSTOMER NAME]";
+  const useNPV  = g.discountEnabled && (g.discountRate || 0) > 0;
+  const netLabel = useNPV ? "Net Present Value" : "Net Value";
+  const netShort = useNPV ? "NPV" : "Net Value";
+
+  const C = {
+    green:  "00875A", greenLight: "E8F5EE", greenAccent: "00C65E",
+    dark:   "0D1526", mid:        "1E3A5F", mutedDark:   "374151",
+    muted:  "6B7280", border:     "D1D5DB", light:       "F3F4F6",
+    white:  "FFFFFF", red:        "EF4444", redLight:    "FEF2F2",
+    blue:   "3B82F6", blueLight:  "EFF6FF", yellow:      "F59E0B",
+    yellowLight: "FFFBEB",
+  };
+
+  // ── Formatters ────────────────────────────────────────────────────────────
+  const fmt  = n => { const a=Math.abs(Math.round(n)); return (n<0?"-$":"$")+a.toLocaleString("en-US"); };
+  const fmtK = n => { const a=Math.abs(n); if(a>=1e6) return (n<0?"-":"")+"$"+(a/1e6).toFixed(1)+"M"; if(a>=1e3) return (n<0?"-":"")+"$"+(a/1e3).toFixed(0)+"K"; return (n<0?"-":"")+"$"+Math.round(a); };
+  const pct  = n => (n*100).toFixed(1)+"%";
+  const fmtHours = h => { if(h>=1000) return (h/1000).toFixed(1)+"K hrs"; return Math.round(h)+" hrs"; };
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+  const CONTENT_W = 9360; // US Letter 8.5" - 1.5" margins = 7" = 10080 DXA, but we use 0.75" = 9360
+  const noBorder = () => ({ top:{style:BorderStyle.NONE,size:0,color:C.white}, bottom:{style:BorderStyle.NONE,size:0,color:C.white}, left:{style:BorderStyle.NONE,size:0,color:C.white}, right:{style:BorderStyle.NONE,size:0,color:C.white} });
+  const thinBorder = (col=C.border) => ({ top:{style:BorderStyle.SINGLE,size:1,color:col}, bottom:{style:BorderStyle.SINGLE,size:1,color:col}, left:{style:BorderStyle.SINGLE,size:1,color:col}, right:{style:BorderStyle.SINGLE,size:1,color:col} });
+  const cm = { top:80, bottom:80, left:120, right:120 };
+
+  const run = (text, opts={}) => new TextRun({ text, font:"Arial", ...opts });
+  const boldRun = (text, color=C.mutedDark, size=22) => new TextRun({ text, font:"Arial", bold:true, color, size });
+  const p = (children, opts={}) => new Paragraph({ children, ...opts });
+  const gap = (before=120, after=60) => new Paragraph({ children:[], spacing:{before,after} });
+
+  const h1 = text => new Paragraph({
+    heading: HeadingLevel.HEADING_1,
+    children: [new TextRun({ text, font:"Arial", size:44, bold:true, color:C.dark })],
+    spacing: { before:360, after:120 },
+    border: { bottom:{ style:BorderStyle.SINGLE, size:8, color:C.green, space:4 } }
+  });
+  const h2 = text => new Paragraph({
+    heading: HeadingLevel.HEADING_2,
+    children: [new TextRun({ text, font:"Arial", size:28, bold:true, color:C.mid })],
+    spacing: { before:240, after:100 }
+  });
+  const bodyP = (text, opts={}) => new Paragraph({
+    children: [new TextRun({ text, font:"Arial", size:22, color:C.mutedDark })],
+    spacing: { before:60, after:60 }, ...opts
+  });
+  const italicP = text => new Paragraph({
+    children: [new TextRun({ text, font:"Arial", size:20, color:C.muted, italics:true })],
+    spacing: { before:40, after:120 }
+  });
+  const bul = (text, boldPrefix=null) => {
+    const kids = boldPrefix
+      ? [new TextRun({text:boldPrefix+" ", font:"Arial", size:22, bold:true, color:C.mutedDark}),
+         new TextRun({text, font:"Arial", size:22, color:C.mutedDark})]
+      : [new TextRun({text, font:"Arial", size:22, color:C.mutedDark})];
+    return new Paragraph({ numbering:{reference:"bullets",level:0}, children:kids, spacing:{before:40,after:40} });
+  };
+  const pageBreak = () => new Paragraph({ children:[new PageBreak()], spacing:{before:0,after:0} });
+
+  // Callout box (left-border accent)
+  const callout = (label, text, fill=C.blueLight, accent=C.blue) => new Table({
+    width:{size:CONTENT_W,type:WidthType.DXA}, columnWidths:[CONTENT_W],
+    rows:[new TableRow({children:[new TableCell({
+      borders:{ top:{style:BorderStyle.NONE,size:0,color:C.white}, bottom:{style:BorderStyle.NONE,size:0,color:C.white}, left:{style:BorderStyle.THICK,size:18,color:accent}, right:{style:BorderStyle.NONE,size:0,color:C.white} },
+      shading:{fill,type:ShadingType.CLEAR},
+      margins:{top:120,bottom:120,left:200,right:200},
+      width:{size:CONTENT_W,type:WidthType.DXA},
+      children:[
+        p([new TextRun({text:label,font:"Arial",size:20,bold:true,color:accent})],{spacing:{before:0,after:60}}),
+        p([new TextRun({text,font:"Arial",size:21,color:C.mutedDark})],{spacing:{before:0,after:0}}),
+      ]
+    })]})],
+  });
+
+  // Placeholder dashed box
+  const placeholder = (label, hint) => new Table({
+    width:{size:CONTENT_W,type:WidthType.DXA}, columnWidths:[CONTENT_W],
+    rows:[new TableRow({children:[new TableCell({
+      borders:{ top:{style:BorderStyle.DASHED,size:4,color:C.border}, bottom:{style:BorderStyle.DASHED,size:4,color:C.border}, left:{style:BorderStyle.DASHED,size:4,color:C.border}, right:{style:BorderStyle.DASHED,size:4,color:C.border} },
+      shading:{fill:C.light,type:ShadingType.CLEAR},
+      margins:{top:100,bottom:100,left:160,right:160},
+      width:{size:CONTENT_W,type:WidthType.DXA},
+      children:[
+        p([new TextRun({text:`[${label}]`,font:"Arial",size:21,bold:true,color:C.muted})],{spacing:{before:0,after:40}}),
+        p([new TextRun({text:hint,font:"Arial",size:20,italics:true,color:C.muted})],{spacing:{before:0,after:0}}),
+      ]
+    })]})],
+  });
+
+  // Standard data table with dark header
+  const dataTable = (headers, rows, colWidths) => {
+    const hRow = new TableRow({ tableHeader:true, children: headers.map((h,i) =>
+      new TableCell({ borders:thinBorder(C.green), shading:{fill:C.dark,type:ShadingType.CLEAR}, margins:cm, width:{size:colWidths[i],type:WidthType.DXA},
+        children:[p([new TextRun({text:h,font:"Arial",size:21,bold:true,color:C.white})],{spacing:{before:60,after:60},alignment:i>0?AlignmentType.RIGHT:AlignmentType.LEFT})]
+      })
+    )});
+    const dRows = rows.map((row,ri) => new TableRow({ children: row.map((cell,ci) => {
+      const isTotal = typeof cell === "object" && cell.total;
+      const txt = typeof cell === "object" ? cell.text : cell;
+      const fill = isTotal ? C.greenLight : (ri%2===0 ? C.white : C.light);
+      const textColor = isTotal ? C.green : C.mutedDark;
+      return new TableCell({ borders:thinBorder(), shading:{fill,type:ShadingType.CLEAR}, margins:cm, width:{size:colWidths[ci],type:WidthType.DXA},
+        children:[p([new TextRun({text:txt,font:"Arial",size:21,bold:isTotal,color:textColor})],{spacing:{before:40,after:40},alignment:ci>0?AlignmentType.RIGHT:AlignmentType.LEFT})]
+      });
+    })}));
+    return new Table({ width:{size:CONTENT_W,type:WidthType.DXA}, columnWidths:colWidths, rows:[hRow,...dRows] });
+  };
+
+  // KPI card row table (dark background)
+  const kpiRow = cards => {
+    const w = Math.floor(CONTENT_W/cards.length);
+    const widths = cards.map((_,i) => i<cards.length-1 ? w : CONTENT_W - w*(cards.length-1));
+    return new Table({
+      width:{size:CONTENT_W,type:WidthType.DXA}, columnWidths:widths,
+      rows:[new TableRow({ children: cards.map((k,i) => new TableCell({
+        borders:thinBorder(C.green), shading:{fill:C.dark,type:ShadingType.CLEAR},
+        margins:{top:160,bottom:160,left:160,right:160}, width:{size:widths[i],type:WidthType.DXA},
+        children:[
+          p([new TextRun({text:k.label.toUpperCase(),font:"Arial",size:16,bold:true,color:C.greenAccent,characterSpacing:20})],{spacing:{before:0,after:60}}),
+          p([new TextRun({text:k.value,font:"Arial",size:40,bold:true,color:C.white})],{spacing:{before:0,after:40}}),
+          ...(k.sub?[p([new TextRun({text:k.sub,font:"Arial",size:18,color:C.border})],{spacing:{before:0,after:0}})]: []),
+        ]
+      }))})],
+    });
+  };
+
+  // Before/After table
+  const beforeAfterTable = rows => {
+    const cw = [400, 4280, 200, 4480];
+    const hRow = new TableRow({ children:[
+      new TableCell({ borders:thinBorder(), shading:{fill:C.light,type:ShadingType.CLEAR}, margins:cm, width:{size:cw[0],type:WidthType.DXA}, children:[p([])] }),
+      new TableCell({ borders:thinBorder(C.red), shading:{fill:C.red,type:ShadingType.CLEAR}, margins:cm, width:{size:cw[1],type:WidthType.DXA}, children:[p([new TextRun({text:"BEFORE WRIKE",font:"Arial",size:21,bold:true,color:C.white})],{spacing:{before:60,after:60}})] }),
+      new TableCell({ borders:noBorder(), shading:{fill:C.white,type:ShadingType.CLEAR}, margins:{top:80,bottom:80,left:60,right:60}, width:{size:cw[2],type:WidthType.DXA}, children:[p([])] }),
+      new TableCell({ borders:thinBorder(C.green), shading:{fill:C.green,type:ShadingType.CLEAR}, margins:cm, width:{size:cw[3],type:WidthType.DXA}, children:[p([new TextRun({text:"AFTER WRIKE",font:"Arial",size:21,bold:true,color:C.white})],{spacing:{before:60,after:60}})] }),
+    ]});
+    const dRows = rows.map((row,ri) => new TableRow({ children:[
+      new TableCell({ borders:thinBorder(), shading:{fill:C.light,type:ShadingType.CLEAR}, margins:cm, width:{size:cw[0],type:WidthType.DXA}, children:[p([new TextRun({text:`${ri+1}`,font:"Arial",size:22,bold:true,color:C.muted})],{alignment:AlignmentType.CENTER,spacing:{before:80,after:80}})] }),
+      new TableCell({ borders:thinBorder(), shading:{fill:C.white,type:ShadingType.CLEAR}, margins:cm, width:{size:cw[1],type:WidthType.DXA}, children:[
+        p([new TextRun({text:row.before,font:"Arial",size:22,bold:true,color:C.red})],{spacing:{before:60,after:40}}),
+        p([new TextRun({text:row.beforeDesc,font:"Arial",size:20,color:C.muted})],{spacing:{before:0,after:60}}),
+      ]}),
+      new TableCell({ borders:noBorder(), shading:{fill:C.white,type:ShadingType.CLEAR}, margins:{top:80,bottom:80,left:40,right:40}, width:{size:cw[2],type:WidthType.DXA}, verticalAlign:VerticalAlign.CENTER, children:[p([new TextRun({text:"→",font:"Arial",size:22,bold:true,color:C.green})],{alignment:AlignmentType.CENTER})] }),
+      new TableCell({ borders:thinBorder(), shading:{fill:C.greenLight,type:ShadingType.CLEAR}, margins:cm, width:{size:cw[3],type:WidthType.DXA}, children:[
+        p([new TextRun({text:row.after,font:"Arial",size:22,bold:true,color:C.green})],{spacing:{before:60,after:40}}),
+        p([new TextRun({text:row.afterDesc,font:"Arial",size:20,color:C.mutedDark})],{spacing:{before:0,after:60}}),
+      ]}),
+    ]}));
+    return new Table({ width:{size:CONTENT_W,type:WidthType.DXA}, columnWidths:cw, rows:[hRow,...dRows] });
+  };
+
+  // ── Chart rendering via Canvas → PNG base64 ──────────────────────────────
+  function makeCanvas(w, h) {
+    const canvas = document.createElement("canvas");
+    canvas.width = w; canvas.height = h;
+    return { canvas, ctx: canvas.getContext("2d") };
+  }
+
+  // Bar chart: value by driver
+  function renderDriverBarChart() {
+    const leverColors = ["#00E05C","#37CEBA","#FFCF00","#A78BFA","#F97316","#14B8A6","#EC4899","#6366F1"];
+    const allLevers = [
+      ...el.map((d,i) => ({ name:d.name, val:model.lt[d.id]||0, color:leverColors[i%leverColors.length] })),
+      ...(model.lt._fte>0 ? [{ name:"FTE Avoidance", val:model.lt._fte, color:"#10B981" }] : []),
+      ...(model.lt._l4>0  ? [{ name:"Platform Consolidation", val:model.lt._l4, color:"#059669" }] : []),
+    ].filter(l=>l.val>0).sort((a,b)=>b.val-a.val).slice(0,8);
+
+    const W=900, H=420, padL=180, padR=40, padT=40, padB=60;
+    const { canvas, ctx } = makeCanvas(W, H);
+    ctx.fillStyle="#FFFFFF"; ctx.fillRect(0,0,W,H);
+
+    const maxVal = Math.max(...allLevers.map(l=>l.val));
+    const barH   = Math.floor((H-padT-padB)/allLevers.length*0.6);
+    const gap2   = Math.floor((H-padT-padB)/allLevers.length);
+    const barMaxW = W-padL-padR;
+
+    allLevers.forEach((lev,i) => {
+      const y = padT + i*gap2 + (gap2-barH)/2;
+      const barW = Math.max(4, (lev.val/maxVal)*barMaxW);
+      // Label
+      ctx.fillStyle="#374151"; ctx.font="bold 13px Arial";
+      ctx.textAlign="right"; ctx.textBaseline="middle";
+      const labelText = lev.name.length>22 ? lev.name.slice(0,21)+"…" : lev.name;
+      ctx.fillText(labelText, padL-8, y+barH/2);
+      // Bar
+      ctx.fillStyle=lev.color;
+      ctx.beginPath(); ctx.roundRect(padL, y, barW, barH, 3); ctx.fill();
+      // Value
+      ctx.fillStyle="#374151"; ctx.font="bold 12px Arial";
+      ctx.textAlign="left"; ctx.textBaseline="middle";
+      ctx.fillText(fmtK(lev.val), padL+barW+6, y+barH/2);
+    });
+
+    // Title
+    ctx.fillStyle="#0D1526"; ctx.font="bold 15px Arial";
+    ctx.textAlign="left"; ctx.textBaseline="top";
+    ctx.fillText(`${H}-Year Value by Driver`, padL, 8);
+
+    return canvas.toDataURL("image/png").split(",")[1];
+  }
+
+  // Cumulative cash flow line chart
+  function renderCashFlowChart() {
+    const W=900, H=380, padL=80, padR=40, padT=50, padB=60;
+    const { canvas, ctx } = makeCanvas(W, H);
+    ctx.fillStyle="#FFFFFF"; ctx.fillRect(0,0,W,H);
+
+    // Build monthly data points (12 pts per year)
+    const months = H * g.horizon;
+    const pts = [];
+    let cumBen=0, cumCost=0;
+    for(let y=0; y<g.horizon; y++) {
+      const yr = model.years[y];
+      const mBen  = yr.totalBenefit/12;
+      const mCost = yr.totalCost/12;
+      for(let m=0; m<12; m++) {
+        cumBen  += mBen;
+        cumCost += mCost;
+        pts.push({ x:(y*12+m+1), ben:cumBen, cost:cumCost, net:cumBen-cumCost });
+      }
+    }
+    const totalMonths = g.horizon * 12;
+    const allVals = pts.flatMap(p=>[p.ben, p.cost, p.net]);
+    const minV = Math.min(0, ...allVals);
+    const maxV = Math.max(...allVals);
+    const range = maxV - minV || 1;
+
+    const toX = m => padL + ((m-1)/totalMonths)*(W-padL-padR);
+    const toY = v => padT + (1-(v-minV)/range)*(H-padT-padB);
+
+    // Zero line
+    const zeroY = toY(0);
+    ctx.strokeStyle="#E5E7EB"; ctx.lineWidth=1; ctx.setLineDash([4,4]);
+    ctx.beginPath(); ctx.moveTo(padL,zeroY); ctx.lineTo(W-padR,zeroY); ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Grid lines & x-axis labels
+    ctx.fillStyle="#6B7280"; ctx.font="12px Arial"; ctx.textAlign="center";
+    for(let y=1; y<=g.horizon; y++) {
+      const x = toX(y*12);
+      ctx.strokeStyle="#F3F4F6"; ctx.lineWidth=1;
+      ctx.beginPath(); ctx.moveTo(x,padT); ctx.lineTo(x,H-padB); ctx.stroke();
+      ctx.fillText(`Year ${y}`, x, H-padB+18);
+    }
+
+    // Draw lines
+    const drawLine = (key, color, dash=[]) => {
+      ctx.strokeStyle=color; ctx.lineWidth=2.5; ctx.setLineDash(dash);
+      ctx.beginPath();
+      pts.forEach((pt,i) => { const x=toX(pt.x), y=toY(pt[key]); i===0?ctx.moveTo(x,y):ctx.lineTo(x,y); });
+      ctx.stroke(); ctx.setLineDash([]);
+    };
+    drawLine("cost","#EF4444",[5,3]);
+    drawLine("ben","#00875A");
+    drawLine("net","#3B82F6");
+
+    // Payback marker
+    if(model.pbm && model.pbm<=totalMonths) {
+      const px=toX(model.pbm);
+      ctx.strokeStyle="#F59E0B"; ctx.lineWidth=2; ctx.setLineDash([3,3]);
+      ctx.beginPath(); ctx.moveTo(px,padT); ctx.lineTo(px,H-padB); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle="#F59E0B"; ctx.font="bold 11px Arial"; ctx.textAlign="center";
+      ctx.fillText(`Payback: Mo ${model.pbm}`, px, padT-8);
+    }
+
+    // Legend
+    const legend = [["Cumulative Benefit","#00875A",[]],["Cumulative Cost","#EF4444",[5,3]],["Net Value","#3B82F6",[]]];
+    let lx = padL;
+    legend.forEach(([label,color,dash]) => {
+      ctx.strokeStyle=color; ctx.lineWidth=2.5; ctx.setLineDash(dash);
+      ctx.beginPath(); ctx.moveTo(lx,H-14); ctx.lineTo(lx+22,H-14); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle="#374151"; ctx.font="12px Arial"; ctx.textAlign="left";
+      ctx.fillText(label, lx+26, H-10);
+      lx += label.length*7+40;
+    });
+
+    // Y-axis labels
+    ctx.fillStyle="#6B7280"; ctx.font="11px Arial"; ctx.textAlign="right";
+    [0,0.25,0.5,0.75,1].forEach(frac => {
+      const v = minV + frac*range;
+      const y = toY(v);
+      ctx.fillText(fmtK(v), padL-6, y+4);
+    });
+
+    // Title
+    ctx.fillStyle="#0D1526"; ctx.font="bold 15px Arial";
+    ctx.textAlign="left"; ctx.textBaseline="top";
+    ctx.fillText(`Cumulative Cash Flow — ${g.horizon}-Year Horizon`, padL, 8);
+
+    return canvas.toDataURL("image/png").split(",")[1];
+  }
+
+  // Render charts
+  const barChartPng  = renderDriverBarChart();
+  const lineChartPng = renderCashFlowChart();
+
+  // transformation width/height are in points (1pt = 1/72 inch). 6.5" content = 468pt.
+  const imgRun = (base64, widthPt=468, aspect=0.47) => new ImageRun({
+    data: Uint8Array.from(atob(base64), c=>c.charCodeAt(0)),
+    transformation:{ width: Math.round(widthPt), height: Math.round(widthPt * aspect) },
+    type:"png",
+  });
+
+  // ── Section builders ─────────────────────────────────────────────────────
+
+  // 1. COVER
+  const coverSection = () => [
+    new Table({
+      width:{size:CONTENT_W,type:WidthType.DXA}, columnWidths:[CONTENT_W],
+      rows:[new TableRow({children:[new TableCell({
+        borders:noBorder(), shading:{fill:C.dark,type:ShadingType.CLEAR},
+        margins:{top:560,bottom:560,left:560,right:560}, width:{size:CONTENT_W,type:WidthType.DXA},
+        children:[
+          p([run("wrike",{size:26,bold:true,color:C.white})],{spacing:{before:0,after:160}}),
+          p([run("Business Case for Wrike",{size:64,bold:true,color:C.white})],{spacing:{before:0,after:120}}),
+          p([run(cName,{size:40,bold:false,color:C.greenAccent})],{spacing:{before:0,after:200}}),
+          p([run(`A ${H}-year financial analysis quantifying the return on adopting Wrike.`,{size:22,italics:true,color:C.border})],{spacing:{before:0,after:0}}),
+        ]
+      })]})],
+    }),
+    gap(480,0),
+    new Table({
+      width:{size:CONTENT_W,type:WidthType.DXA}, columnWidths:[2640,6720],
+      rows:[
+        ...[ ["Prepared for:","[EXECUTIVE SPONSOR], [TITLE]"],
+             ["Prepared by:", "[WRIKE AE NAME], [TITLE]"],
+             ["Date:",        "[MONTH YEAR]"],
+             ["Analysis Period:", `${H}-Year Financial Projection`],
+        ].map(([label,val]) => new TableRow({children:[
+          new TableCell({borders:noBorder(),shading:{fill:C.white,type:ShadingType.CLEAR},margins:cm,width:{size:2640,type:WidthType.DXA},children:[p([run(label,{size:21,bold:true,color:C.muted})],{spacing:{before:60,after:60}})]}),
+          new TableCell({borders:noBorder(),shading:{fill:C.white,type:ShadingType.CLEAR},margins:cm,width:{size:6720,type:WidthType.DXA},children:[p([run(val,{size:21,color:C.mutedDark})],{spacing:{before:60,after:60}})]}),
+        ]})),
+      ]
+    }),
+    gap(400,0),
+    p([run("© Wrike, Inc. | Confidential",{size:18,italics:true,color:C.muted})],{alignment:AlignmentType.CENTER,spacing:{before:0,after:0}}),
+    pageBreak(),
+  ];
+
+  // 2. INSTRUCTIONS
+  const instructionsSection = () => {
+    const sections = [
+      ["Executive Summary","Always include. Add 2–3 challenge bullets and urgency line."],
+      ["Existing Team Results","Optional — expansion deals only. Add metrics and quote."],
+      ["Current State → Future State","Always include. Add discovery context and champion quote."],
+      ["Financial Detail","Always include. Fully auto-populated — verify values only."],
+      ["Strategic Value Beyond ROI","Include for $50K+ ACV or C-level audience. Add revenue/talent narrative."],
+      ["Appendix","Always include. Review assumptions."],
+    ];
+    return [
+      callout("⚠  DELETE THIS PAGE BEFORE SHARING","Review all [BRACKETED] placeholders and fill in before sending to the customer. Sections marked Optional can be deleted if not applicable.", C.redLight, C.red),
+      gap(160,0),
+      dataTable(["Section","When to Include / What to Complete"],
+        sections.map(([s,g2]) => [s, g2]),
+        [3200,6160]
+      ),
+      pageBreak(),
+    ];
+  };
+
+  // 3. EXECUTIVE SUMMARY
+  const execSummarySection = () => {
+    // Hours saved card
+    const totalHours = model.totalHours || 0;
+    const netVal     = useNPV ? model.npv : (model.tb - model.tc);
+    const netValFmt  = fmtK(netVal);
+    const pbStr      = model.pbm ? `${model.pbm} mo` : "N/A";
+    const pbSub      = model.pbm ? `~${(model.pbm/12).toFixed(1)} years` : "";
+
+    // Driver breakdown mini-table for exec summary
+    const leverColors = ["#00E05C","#37CEBA","#FFCF00","#A78BFA","#F97316","#14B8A6","#EC4899","#6366F1"];
+    const allLevers = [
+      ...el.map((d,i)=>({name:d.name, val:model.lt[d.id]||0})),
+      ...(model.lt._fte>0?[{name:"FTE Avoidance",val:model.lt._fte}]:[]),
+      ...(model.lt._l4>0?[{name:"Platform Consolidation",val:model.lt._l4}]:[]),
+    ].filter(l=>l.val>0).sort((a,b)=>b.val-a.val);
+
+    const leverRows = allLevers.map(l=>[l.name, fmtK(l.val)]);
+    leverRows.push([{text:`${H}-Year Total Benefit`,total:true}, {text:fmtK(model.tb),total:true}]);
+
+    return [
+      h1("Executive Summary"),
+      italicP(`${H}-year financial analysis for ${cName}`),
+      kpiRow([
+        {label:netShort, value:netValFmt, sub: useNPV?`${H}-yr @ ${pct(g.discountRate||0)}`:`${H}-yr net`},
+        {label:"Hours Saved", value:fmtHours(totalHours), sub:"Included in Net Value"},
+        {label:"Payback Period", value:pbStr, sub:pbSub},
+        {label:"Cost of Inaction", value:fmtK(model.coiTotal), sub:`${H}-yr status quo cost`},
+      ]),
+      gap(200,0),
+      h2("Value by Driver"),
+      dataTable(["Value Driver", `${H}-Year Total`], leverRows, [6480,2880]),
+      gap(200,0),
+      h2("Key Challenges"),
+      callout("Complete Before Sharing","Add 2–3 specific challenges raised during discovery. Use the customer's own language.", C.yellowLight, C.yellow),
+      gap(80,0),
+      bul("","[CHALLENGE 1]:"),
+      bul("","[CHALLENGE 2]:"),
+      bul("","[CHALLENGE 3]:"),
+      gap(160,0),
+      h2("Why Act Now"),
+      placeholder("Urgency Driver","e.g., contract renewal, headcount mandate, compliance deadline, exec-sponsored initiative"),
+      pageBreak(),
+    ];
+  };
+
+  // 4. EXISTING TEAM RESULTS (optional)
+  const existingTeamSection = () => [
+    h1("Results from Existing Wrike Teams"),
+    callout("OPTIONAL — Expansion Deals Only","Include this section only when the customer already has a Wrike deployment with real data to reference. Delete this page for new-logo deals.", C.yellowLight, C.yellow),
+    gap(120,0),
+    bodyP(`[COMPANY NAME] teams already using Wrike have demonstrated measurable outcomes. This expansion opportunity builds on proven results.`),
+    gap(120,0),
+    dataTable(["Metric","Result"],[
+      ["Reduction in reporting time","[X]%"],
+      ["Hours reclaimed per team member / week","[X] hrs/wk"],
+      ["Payback period achieved","[X] months"],
+      ["[Additional metric from internal data]","[VALUE]"],
+    ],[5760,3600]),
+    gap(160,0),
+    h2("What the Team is Saying"),
+    placeholder("Internal Quote","e.g., \"Wrike gave us the visibility we never had. Our team spends 40% less time in status meetings.\" — [NAME], [TITLE], [DEPT]"),
+    pageBreak(),
+  ];
+
+  // 5. CURRENT STATE → FUTURE STATE
+  const currentFutureSection = () => {
+    // Auto-build before/after rows from drivers + model
+    const rows = [
+      { before:"Fragmented tools", beforeDesc:"Manual data assembly across disconnected systems creates reporting delays and blind spots.", after:"Real-time visibility", afterDesc:"Dashboards connected to OKRs give leadership instant status across all teams." },
+      { before:"No single source of truth", beforeDesc:"Each team tracks differently — version conflicts and rework are constant.", after:"Unified platform", afterDesc:"One system of record eliminates duplicated effort and version chaos." },
+      { before:"Reactive decisions", beforeDesc:"Leadership acts on stale data. Issues surface too late to course-correct.", after:"Proactive management", afterDesc:"Predictive insights surface risks early — before they become delays." },
+      { before:"Scale requires headcount", beforeDesc:"Growth means more hires. No efficiency multiplier from existing investment.",
+        after:"Scale without adding headcount",
+        afterDesc: model.lt._fte>0 ? `${fmtK(model.lt._fte)} in FTE costs avoided over ${H} years. Automation and templates absorb growth.` : "[X] FTEs in avoided headcount costs. Automation and templates absorb growth." },
+    ];
+
+    // CoI breakdown
+    const coiRows = [
+      ...el.map(d => [d.name, fmtK(model.years.reduce((a,y)=>a+(y.coiByDriver[d.id]||0),0))]),
+      ...(g.legacyFullCost>0?[["Legacy Platform (Status Quo)", fmtK(g.legacyFullCost * H)]]: []),
+      ...(g.fteAvoided>0?[["FTE Headcount Gap (No Automation)", fmtK(g.fteAvoided*g.fteCost*H)]]: []),
+      [{text:`${H}-Year Cost of Inaction`,total:true},{text:fmtK(model.coiTotal),total:true}],
+    ];
+
+    return [
+      h1("Current State → Future State"),
+      italicP("Where "+cName+" is today, and what changes with Wrike."),
+      placeholder("Operating Context","One sentence: e.g., 'Today, [COMPANY] operates [X] teams across [Y] departments using fragmented tools that limit visibility and scale.'"),
+      gap(160,0),
+      beforeAfterTable(rows),
+      gap(200,0),
+      h2("Cost of Doing Nothing"),
+      bodyP(`Every year without action carries a measurable cost. The table below estimates what the status quo is costing ${cName} over ${H} years.`),
+      gap(80,0),
+      dataTable(["Cost Category",`${H}-Year Impact`], coiRows, [6480,2880]),
+      gap(160,0),
+      placeholder("Champion Quote","e.g., \"We spend more time tracking work than doing it.\" — [NAME], [TITLE]"),
+      pageBreak(),
+    ];
+  };
+
+  // 6. FINANCIAL DETAIL
+  const financialSection = () => {
+    const netVal = useNPV ? model.npv : (model.tb - model.tc);
+
+    // Year-by-year table rows
+    const yearHeaders = ["Category", ...model.years.map(y=>`Year ${y.year}`), "Total"];
+    const colW = [3200, ...Array(g.horizon).fill(Math.floor((CONTENT_W-3200)/g.horizon)), 0];
+    // Fix last col
+    const dataColW = Math.floor((CONTENT_W-3200)/g.horizon);
+    const lastColW = CONTENT_W - 3200 - dataColW*(g.horizon);
+    const colWidths = [3200, ...Array(g.horizon).fill(dataColW), dataColW+lastColW];
+
+    const costRows = [
+      ["Wrike Licenses",        ...model.years.map(y=>fmt(y.wLicCost)),    fmt(model.years.reduce((a,y)=>a+y.wLicCost,0))],
+      ["Professional Services", ...model.years.map(y=>fmt(y.wProf)),       fmt(model.years.reduce((a,y)=>a+y.wProf,0))],
+      ["Migration",             ...model.years.map(y=>fmt(y.wMig)),        fmt(model.years.reduce((a,y)=>a+y.wMig,0))],
+    ].filter(r => r.slice(1,-1).some(v=>v!=="$0"));
+
+    const totalCostRow = [{text:"Total Investment",total:true}, ...model.years.map(y=>({text:fmt(y.totalCost),total:true})), {text:fmt(model.tc),total:true}];
+
+    const benRows = [
+      ...el.map(d => [d.name, ...model.years.map(y=>fmt(y.lv[d.id]||0)), fmt(model.lt[d.id]||0)]),
+      ...(model.lt._fte>0?[["FTE Avoidance", ...model.years.map(y=>fmt(y.fteSav)), fmt(model.lt._fte)]]: []),
+      ...(model.lt._l4>0?[["Platform Consolidation", ...model.years.map(y=>fmt(y.legacySav)), fmt(model.lt._l4)]]: []),
+    ];
+    const totalBenRow = [{text:"Total Benefit",total:true}, ...model.years.map(y=>({text:fmt(y.totalBenefit),total:true})), {text:fmt(model.tb),total:true}];
+    const netRow      = [{text:netShort,total:true}, ...model.years.map(y=>({text:fmt(y.totalBenefit-y.totalCost),total:true})), {text:fmtK(netVal),total:true}];
+
+    const allTableRows = [
+      // Cost section header
+      [{ text:"COSTS", total:false, _header:true }],
+      ...costRows,
+      totalCostRow,
+      // Benefit section header
+      [{ text:"BENEFITS", total:false, _header:true }],
+      ...benRows,
+      totalBenRow,
+      netRow,
+    ];
+
+    // Build table manually for section headers
+    const hRow = new TableRow({ tableHeader:true, children: yearHeaders.map((h,i)=>
+      new TableCell({ borders:thinBorder(C.green), shading:{fill:C.dark,type:ShadingType.CLEAR}, margins:cm, width:{size:colWidths[i],type:WidthType.DXA},
+        children:[p([run(h,{size:21,bold:true,color:C.white})],{alignment:i>0?AlignmentType.RIGHT:AlignmentType.LEFT,spacing:{before:60,after:60}})]
+      })
+    )});
+
+    const buildRow = (row, ri) => {
+      // Section header row
+      if(row.length===1 && row[0]._header) {
+        const isB = row[0].text==="BENEFITS";
+        return new TableRow({ children:[new TableCell({
+          borders:thinBorder(isB?C.green:C.red), shading:{fill:isB?C.greenLight:C.redLight,type:ShadingType.CLEAR},
+          margins:cm, width:{size:CONTENT_W,type:WidthType.DXA}, columnSpan:yearHeaders.length,
+          children:[p([run(row[0].text,{size:20,bold:true,color:isB?C.green:C.red,characterSpacing:20})],{spacing:{before:40,after:40}})]
+        })]}); 
+      }
+      return new TableRow({ children: row.map((cell,ci)=>{
+        const isTotal = typeof cell==="object" && cell.total;
+        const txt = typeof cell==="object" ? cell.text : cell;
+        const fill = isTotal ? (ci>0 && txt.startsWith("-") ? C.redLight : C.greenLight) : (ri%2===0?C.white:C.light);
+        const color = isTotal ? (txt.startsWith("-")?C.red:C.green) : C.mutedDark;
+        return new TableCell({ borders:thinBorder(), shading:{fill,type:ShadingType.CLEAR}, margins:cm, width:{size:colWidths[ci],type:WidthType.DXA},
+          children:[p([run(txt,{size:21,bold:isTotal,color})],{alignment:ci>0?AlignmentType.RIGHT:AlignmentType.LEFT,spacing:{before:40,after:40}})]
+        });
+      })});
+    };
+
+    const finTable = new Table({ width:{size:CONTENT_W,type:WidthType.DXA}, columnWidths:colWidths, rows:[hRow, ...allTableRows.map(buildRow)] });
+
+    return [
+      h1("Financial Detail"),
+      italicP(`${H}-year projection — all figures from the Wrike Value Model.`),
+      kpiRow([
+        {label:netShort, value:fmtK(netVal), sub:useNPV?`${H}-yr @ ${pct(g.discountRate||0)}`:`${H}-yr net`},
+        {label:"Total Benefit", value:fmtK(model.tb), sub:`vs ${fmtK(model.tc)} investment`},
+        {label:"Payback Period", value:model.pbm?`${model.pbm} mo`:"N/A", sub:model.pbm?`~${(model.pbm/12).toFixed(1)} years`:""},
+        {label:"Cost of Inaction", value:fmtK(model.coiTotal), sub:`${H}-yr do-nothing cost`},
+      ]),
+      gap(200,0),
+      finTable,
+      gap(240,0),
+      h2("Value by Driver"),
+      p([imgRun(barChartPng, 468, 0.47)],{spacing:{before:80,after:80}}),
+      gap(240,0),
+      h2("Cumulative Cash Flow"),
+      p([imgRun(lineChartPng, 468, 0.42)],{spacing:{before:80,after:80}}),
+      pageBreak(),
+    ];
+  };
+
+  // 7. STRATEGIC VALUE BEYOND ROI
+  const stratValueSection = () => [
+    h1("Strategic Value Beyond ROI"),
+    italicP("Quantitative ROI is the foundation — but the full business case extends further. These dimensions compound over time and are not included in the financial model above."),
+    h2("Revenue Enablement"),
+    placeholder("Revenue Impact","e.g., '[CUSTOMER] generates $[X]M tied to campaign launches. Delays average [X] days due to coordination gaps. A [X]% improvement in launch velocity = $[X]M in accelerated revenue.'"),
+    gap(120,0),
+    h2("Customer & Partner Experience"),
+    placeholder("Retention / Experience Impact","e.g., '$[X]M ARR is tied to on-time delivery. Current SLA miss rate of [X]% creates churn risk. Wrike workflow visibility directly reduces that exposure.'"),
+    gap(120,0),
+    h2("Talent & Organizational Scale"),
+    ...(model.totalHours>0 ? [
+      bodyP(`Wrike is projected to reclaim ${fmtHours(model.totalHours)} of team capacity over ${H} years — equivalent to ${fmtK(model.totalHours * (g.fteCost/2080))} in staff time at your fully-loaded cost rate. This capacity is already reflected in the Net Value figure.`),
+    ] : [
+      placeholder("Talent Impact","e.g., '[X] FTEs spend [X]% of time on admin coordination. Reclaiming that = [X] FTEs of capacity without additional headcount.'"),
+    ]),
+    gap(120,0),
+    h2("AI & Future Readiness"),
+    bul("AI Work Intelligence: Predictive risk scoring surfaces blockers before they impact timelines."),
+    bul("Generative AI: Automated project briefs, status summaries, and request intake reduce coordination overhead."),
+    bul("AI-Powered Insights: Cross-project pattern recognition enables smarter resource allocation over time."),
+    gap(160,0),
+    callout("Note on Strategic Value","These estimates are directional. They are intentionally excluded from the financial model to maintain conservatism. Add specific figures from discovery to strengthen this section before sharing.", C.light, C.muted),
+    pageBreak(),
+  ];
+
+  // 8. APPENDIX
+  const appendixSection = () => {
+    const paramRows = [
+      ["Customer", cName],
+      ["Analysis Period", `${H} years`],
+      ["Discount Rate", useNPV ? pct(g.discountRate||0) : "Not applied"],
+      ["FTE Fully-Loaded Cost", `${fmtK(g.fteCost||0)} / year`],
+      ["Adoption Ramp", `${g.adoptionRamp||0} months`],
+      ["Headcount Growth", pct(g.headcountGrowth||0)+" / year"],
+      ["FTE Avoidance", g.fteAvoided>0 ? `${g.fteAvoided} FTEs` : "Not modeled"],
+      ["Legacy Platform Phase-Down", g.legacyFullCost>0 ? `${fmtK(g.legacyFullCost)} base` : "Not modeled"],
+    ];
+
+    const driverRows = el.map(d => [d.name, d.type, fmtK(model.lt[d.id]||0)]);
+
+    const scenRows = [
+      ["Conservative (lower adoption, no FTE avoidance)", "[VALUE]", "[X]%", "[X] mo"],
+      ["Base Case (current model inputs)",                fmtK(model.npv), pct(model.roi), model.pbm?`${model.pbm} mo`:"N/A"],
+      ["Aggressive (full adoption, all levers)",          "[VALUE]", "[X]%", "[X] mo"],
+    ];
+
+    return [
+      h1("Appendix"),
+      h2("A. Model Assumptions"),
+      dataTable(["Parameter","Value Used"], paramRows, [4680,4680]),
+      gap(200,0),
+      h2("B. Active Value Drivers"),
+      dataTable(["Driver Name","Formula Type",`${H}-Year Value`], driverRows, [3600,2880,2880]),
+      gap(200,0),
+      h2("C. Sensitivity Scenarios"),
+      dataTable([netShort,"ROI","Payback"], scenRows.map(([s,...rest])=>[s,...rest]), [3600,1920,1920,1920]),
+      gap(200,0),
+      h2("D. Glossary"),
+      dataTable(["Term","Definition"],[
+        ["Net Value","Total benefit minus total investment over the model horizon."],
+        ["NPV (Net Present Value)","Future cash flows discounted back to today at the stated discount rate."],
+        ["ROI","(Total Benefit − Total Cost) ÷ Total Cost, as a percentage."],
+        ["Cost of Inaction","Estimated ongoing cost of the status quo if no investment is made."],
+        ["Adoption Ramp","Months before full productivity benefits are assumed to accrue."],
+        ["FTE Avoidance","Headcount growth absorbed by the platform rather than additional hires."],
+      ],[3000,6360]),
+    ];
+  };
+
+  // ── Assemble document ────────────────────────────────────────────────────
+  const allChildren = [
+    ...coverSection(),
+    ...instructionsSection(),
+    ...execSummarySection(),
+    ...existingTeamSection(),
+    ...currentFutureSection(),
+    ...financialSection(),
+    ...stratValueSection(),
+    ...appendixSection(),
+  ];
+
+  const doc = new Document({
+    numbering: { config:[
+      { reference:"bullets", levels:[{ level:0, format:LevelFormat.BULLET, text:"•", alignment:AlignmentType.LEFT, style:{paragraph:{indent:{left:720,hanging:360}}} }] },
+    ]},
+    styles: {
+      default: { document:{ run:{ font:"Arial", size:22 } } },
+      paragraphStyles:[
+        { id:"Heading1", name:"Heading 1", basedOn:"Normal", next:"Normal", quickFormat:true,
+          run:{size:44,bold:true,font:"Arial",color:"0D1526"},
+          paragraph:{spacing:{before:360,after:120},outlineLevel:0,border:{bottom:{style:BorderStyle.SINGLE,size:8,color:"00875A",space:4}}} },
+        { id:"Heading2", name:"Heading 2", basedOn:"Normal", next:"Normal", quickFormat:true,
+          run:{size:28,bold:true,font:"Arial",color:"1E3A5F"},
+          paragraph:{spacing:{before:240,after:100},outlineLevel:1} },
+      ]
+    },
+    sections:[{
+      properties:{ page:{ size:{width:12240,height:15840}, margin:{top:1080,right:1080,bottom:1080,left:1080} } },
+      headers:{ default: new Header({ children:[
+        new Table({ width:{size:10080,type:WidthType.DXA}, columnWidths:[5040,5040], rows:[new TableRow({children:[
+          new TableCell({borders:noBorder(),shading:{fill:"FFFFFF",type:ShadingType.CLEAR},margins:{top:60,bottom:60,left:0,right:0},width:{size:5040,type:WidthType.DXA},children:[p([run("wrike",{size:20,bold:true,color:"0D1526"})],{spacing:{before:0,after:0}})]}),
+          new TableCell({borders:noBorder(),shading:{fill:"FFFFFF",type:ShadingType.CLEAR},margins:{top:60,bottom:60,left:0,right:0},width:{size:5040,type:WidthType.DXA},children:[p([run(`Business Case for Wrike  |  ${cName}`,{size:18,color:"6B7280"})],{alignment:AlignmentType.RIGHT,spacing:{before:0,after:0}})]}),
+        ]})]})  ,
+        new Paragraph({border:{bottom:{style:BorderStyle.SINGLE,size:4,color:"00875A",space:1}},children:[],spacing:{before:60,after:0}}),
+      ]})},
+      footers:{ default: new Footer({ children:[
+        new Paragraph({border:{top:{style:BorderStyle.SINGLE,size:2,color:"D1D5DB",space:4}},children:[],spacing:{before:0,after:60}}),
+        new Table({ width:{size:10080,type:WidthType.DXA}, columnWidths:[6720,3360], rows:[new TableRow({children:[
+          new TableCell({borders:noBorder(),shading:{fill:"FFFFFF",type:ShadingType.CLEAR},margins:{top:40,bottom:40,left:0,right:0},width:{size:6720,type:WidthType.DXA},children:[p([run("© Wrike, Inc. | Confidential",{size:18,color:"6B7280"})],{spacing:{before:0,after:0}})]}),
+          new TableCell({borders:noBorder(),shading:{fill:"FFFFFF",type:ShadingType.CLEAR},margins:{top:40,bottom:40,left:0,right:0},width:{size:3360,type:WidthType.DXA},children:[p([run("Prepared for "+cName,{size:18,color:"6B7280"})],{alignment:AlignmentType.RIGHT,spacing:{before:0,after:0}})]}),
+        ]})]})
+      ]})},
+      children: allChildren,
+    }],
+  });
+
+  const buffer = await Packer.toBlob(doc);
+  const url = URL.createObjectURL(buffer);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `Wrike_Business_Case${g.customerName?"_"+g.customerName.replace(/\s+/g,"_"):""}.docx`;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 /* ── PPTX Export ── */
@@ -1707,7 +2401,7 @@ function App(){
               <button onClick={()=>{exportCSV(model,drivers,g,scenarios,scenarioResults,kpis);const m=document.getElementById("_exportMenu");if(m)m.style.display="none";}} style={{width:"100%",padding:"9px 14px",border:"none",background:"none",color:"#f1f5f9",cursor:"pointer",fontSize:11,fontWeight:600,textAlign:"left",display:"flex",alignItems:"center",gap:8}} onMouseEnter={e=>e.currentTarget.style.background="#334155"} onMouseLeave={e=>e.currentTarget.style.background="none"}><span style={{fontSize:13}}>📊</span> Excel</button>
               <button onClick={()=>{exportPPTX(model,drivers,g);const m=document.getElementById("_exportMenu");if(m)m.style.display="none";}} style={{width:"100%",padding:"9px 14px",border:"none",background:"none",color:"#00e05c",cursor:"pointer",fontSize:11,fontWeight:600,textAlign:"left",display:"flex",alignItems:"center",gap:8}} onMouseEnter={e=>e.currentTarget.style.background="#334155"} onMouseLeave={e=>e.currentTarget.style.background="none"}><span style={{fontSize:13}}>📑</span> PowerPoint</button>
               <div style={{borderTop:"1px solid #334155",margin:"2px 0"}}/>
-              <button disabled title="Coming soon" style={{width:"100%",padding:"9px 14px",border:"none",background:"none",color:"#475569",cursor:"not-allowed",fontSize:11,fontWeight:600,textAlign:"left",display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:13}}>📝</span> Word <span style={{fontSize:9,marginLeft:"auto",color:"#334155"}}>Soon</span></button>
+              <button disabled title="Coming soon" style={{width:"100%",padding:"9px 14px",border:"none",background:"none",color:"#00e05c",cursor:"pointer",fontSize:11,fontWeight:600,textAlign:"left",display:"flex",alignItems:"center",gap:8}} onClick={()=>{exportWord(model,drivers,g);const m=document.getElementById("_exportMenu");if(m)m.style.display="none";}} onMouseEnter={e=>e.currentTarget.style.background="#334155"} onMouseLeave={e=>e.currentTarget.style.background="none"}><span style={{fontSize:13}}>📝</span> Word</button>
             </div>
           </div>
         </div>
