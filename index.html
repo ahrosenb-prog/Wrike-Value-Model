@@ -4,9 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Wrike Value Model</title>
-<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
-  *{box-sizing:border-box;margin:0;padding:0}body{font-family:'DM Sans',sans-serif}
+  *{box-sizing:border-box;margin:0;padding:0}body{font-family:'Montserrat',sans-serif}
   input[type="range"]{-webkit-appearance:none;appearance:none;height:3px;background:#e2e8f0;border-radius:2px;outline:none}
   input[type="range"]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:#3b82f6;cursor:pointer}
   input[type="number"]{-moz-appearance:textfield}input[type="number"]::-webkit-inner-spin-button,input[type="number"]::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
@@ -25,8 +25,8 @@
 const { useState, useMemo, useEffect } = React;
 
 /* ═══ URL STATE SHARING ═══ */
-function encodeState(drivers, g, kpis, removedKpis) {
-  const state = { d: drivers, g, k: kpis, r: removedKpis };
+function encodeState(drivers, g, kpis, removedKpis, displayOrder) {
+  const state = { d: drivers, g, k: kpis, r: removedKpis, o: displayOrder };
   const json = JSON.stringify(state);
   try {
     // LZ-string compress then encode for URL safety (60-70% smaller than plain base64)
@@ -54,31 +54,139 @@ function getURLConfig() {
   if (!cfg) return null;
   return decodeState(cfg);
 }
-function generateShareURL(drivers, g, kpis, removedKpis) {
-  const encoded = encodeState(drivers, g, kpis, removedKpis);
+function hashStr(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) - h) + s.charCodeAt(i) | 0;
+  return (h >>> 0).toString(36);
+}
+function getPublicForkKey() {
+  const params = new URLSearchParams(window.location.search);
+  const cfg = params.get("config");
+  return cfg ? "wrike_public_fork_" + hashStr(cfg) : null;
+}
+function getPublicFork(key) {
+  if (!key) return null;
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) { return null; }
+}
+function setPublicFork(key, data) {
+  if (!key || !data) return;
+  try { localStorage.setItem(key, JSON.stringify(data)); } catch (e) {}
+}
+function generateShareURL(drivers, g, kpis, removedKpis, displayOrder) {
+  const encoded = encodeState(drivers, g, kpis, removedKpis, displayOrder);
   if (!encoded) return null;
   const base = window.location.origin + window.location.pathname;
   return base + "?config=" + encoded;
+}
+function getCategoryFromLibrary(id) {
+  const cat = DRIVER_LIBRARY.find(c => c.items.some(it => it.id === id));
+  return cat ? cat.cat : "Productivity Gains";
+}
+function buildDisplayOrderFromDrivers(drivers) {
+  if (!drivers.length) return [];
+  const catOrder = DRIVER_LIBRARY.map(c => c.cat);
+  const getCat = (d) => d.category || getCategoryFromLibrary(d.id);
+  const out = [];
+  catOrder.forEach(cat => {
+    const inCat = drivers.filter(d => getCat(d) === cat);
+    if (inCat.length) {
+      out.push({ type: "section", category: cat });
+      inCat.forEach(d => out.push({ type: "driver", id: d.id }));
+    }
+  });
+  return out;
+}
+function insertDriversIntoDisplayOrder(displayOrder, newDrivers) {
+  let order = [...displayOrder];
+  const getCat = (d) => d.category || getCategoryFromLibrary(d.id);
+  newDrivers.forEach(nd => {
+    const cat = getCat(nd);
+    let sectionIdx = order.findIndex(x => x.type === "section" && x.category === cat);
+    if (sectionIdx === -1) {
+      order.push({ type: "section", category: cat });
+      order.push({ type: "driver", id: nd.id });
+      return;
+    }
+    let insertIdx = sectionIdx + 1;
+    while (insertIdx < order.length && order[insertIdx].type === "driver") insertIdx++;
+    order.splice(insertIdx, 0, { type: "driver", id: nd.id });
+  });
+  return order;
+}
+function getSectionBeforeDriver(order, driverId) {
+  const idx = order.findIndex(x => x.type === "driver" && x.id === driverId);
+  if (idx <= 0) return null;
+  for (let i = idx - 1; i >= 0; i--) if (order[i].type === "section") return order[i].category;
+  return null;
+}
+function getSectionBlockEnd(order, sectionIdx) {
+  let i = sectionIdx + 1;
+  while (i < order.length && order[i].type === "driver") i++;
+  return i - 1;
+}
+function getPrevSectionIndex(order, sectionIdx) {
+  for (let i = sectionIdx - 1; i >= 0; i--) if (order[i].type === "section") return i;
+  return -1;
+}
+function getNextSectionIndex(order, sectionIdx) {
+  for (let i = sectionIdx + 1; i < order.length; i++) if (order[i].type === "section") return i;
+  return order.length;
+}
+function moveSectionBlockUp(order, sectionIdx) {
+  const endIdx = getSectionBlockEnd(order, sectionIdx);
+  const prevSectionIdx = getPrevSectionIndex(order, sectionIdx);
+  if (prevSectionIdx === -1) return order;
+  const block = order.slice(sectionIdx, endIdx + 1);
+  const before = order.slice(0, prevSectionIdx);
+  const between = order.slice(prevSectionIdx, sectionIdx);
+  const after = order.slice(endIdx + 1);
+  return [...before, ...block, ...between, ...after];
+}
+function moveSectionBlockDown(order, sectionIdx) {
+  const endIdx = getSectionBlockEnd(order, sectionIdx);
+  const nextSectionIdx = getNextSectionIndex(order, sectionIdx);
+  if (nextSectionIdx >= order.length) return order;
+  const nextEndIdx = getSectionBlockEnd(order, nextSectionIdx);
+  const block = order.slice(sectionIdx, nextSectionIdx);
+  const nextBlock = order.slice(nextSectionIdx, nextEndIdx + 1);
+  const before = order.slice(0, sectionIdx);
+  const after = order.slice(nextEndIdx + 1);
+  return [...before, ...nextBlock, ...block, ...after];
 }
 
 /* ═══ FORMULA TYPES ═══ */
 const FORMULA_TYPES = [
   { v:"time", l:"Time Savings", d:"People * Hours * Frequency * Rate * Reduction %",
-    defaults:{people:2,hoursPerCycle:8,cyclesPerYear:12,reduction:0.60},
-    labels:{people:"Team Size",hoursPerCycle:"Hours / Cycle / Person",cyclesPerYear:"Cycles / Year",reduction:"% Reduction with Wrike"},
+    defaults:{people:2,hoursPerCycle:8,cyclesPerYear:12,reduction:0.60,fteCost:100000},
+    labels:{people:"Team Size",hoursPerCycle:"Hours / Cycle / Person",cyclesPerYear:"Cycles / Year",reduction:"% Reduction with Wrike",fteCost:"Fully-Loaded FTE Cost"},
     freqPresets:[{l:"Weekly",v:52},{l:"Bi-weekly",v:26},{l:"Monthly",v:12},{l:"Quarterly",v:4},{l:"Annual",v:1}] },
   { v:"incident", l:"Incident / Project-Based", d:"Incidents or Projects × Hours per Occurrence × Frequency × Recapture %",
-    defaults:{people:10,hoursPerIncident:2,incidentsPerYear:12,recapture:0.60},
-    labels:{people:"Incidents / Projects Affected",hoursPerIncident:"Hours / Person / Incident",incidentsPerYear:"Incidents / Year",recapture:"Recapture Rate"} },
+    defaults:{people:10,hoursPerIncident:2,incidentsPerYear:12,recapture:0.60,fteCost:100000},
+    labels:{people:"Incidents / Projects Affected",hoursPerIncident:"Hours / Person / Incident",incidentsPerYear:"Incidents / Year",recapture:"Recapture Rate",fteCost:"Fully-Loaded FTE Cost"} },
   { v:"risk", l:"Risk Reduction", d:"Cost per Incident * (Current Probability - Wrike Probability)",
-    defaults:{costPerIncident:100000,probCurrent:0.10,probWrike:0.02},
-    labels:{costPerIncident:"Cost Per Incident",probCurrent:"Probability Today",probWrike:"Probability with Wrike"} },
+    defaults:{costPerIncident:100000,probCurrent:0.10,probWrike:0.02,fteCost:100000},
+    labels:{costPerIncident:"Cost Per Incident",probCurrent:"Probability Today",probWrike:"Probability with Wrike",fteCost:"Fully-Loaded FTE Cost"} },
   { v:"revenue", l:"Revenue Impact", d:"Annual Revenue at Risk * Improvement %",
-    defaults:{annualValue:500000,improvement:0.10},
-    labels:{annualValue:"Annual Revenue / Value at Risk",improvement:"% Improvement with Wrike"} },
+    defaults:{annualValue:500000,improvement:0.10,fteCost:100000},
+    labels:{annualValue:"Annual Revenue / Value at Risk",improvement:"% Improvement with Wrike",fteCost:"Fully-Loaded FTE Cost"} },
   { v:"project_delay", l:"Project Delay", d:"Projects/Yr * % Delayed * Avg Days Late * Daily Cost * Reduction %",
-    defaults:{projectsPerYear:24,delayRate:0.45,avgDelayDays:10,dailyCostOfDelay:1500,reductionRate:0.60},
-    labels:{projectsPerYear:"Projects / Year",delayRate:"% Projects Delayed",avgDelayDays:"Avg Days Late per Delayed Project",dailyCostOfDelay:"Daily Cost of Delay ($)",reductionRate:"% Reduction with Wrike"} },
+    defaults:{projectsPerYear:24,delayRate:0.45,avgDelayDays:10,dailyCostOfDelay:1500,reductionRate:0.60,fteCost:100000},
+    labels:{projectsPerYear:"Projects / Year",delayRate:"% Projects Delayed",avgDelayDays:"Avg Days Late per Delayed Project",dailyCostOfDelay:"Daily Cost of Delay ($)",reductionRate:"% Reduction with Wrike",fteCost:"Fully-Loaded FTE Cost"} },
+  { v:"customer_churn", l:"Customer Churn Impact", d:"Customer Churn % × Current Customers × Avg Revenue per Customer",
+    defaults:{currentCustomers:100,avgRevenuePerCustomer:5000,churnImpact:0.10},
+    labels:{currentCustomers:"Current Customers (#)",avgRevenuePerCustomer:"Average Annual Revenue per Customer ($)",churnImpact:"Customer Churn Impact (%)"}, noFteCost:true },
+  { v:"profit_margin", l:"Profit Margin Impact", d:"Profit Margin Impact % × Annual Revenue",
+    defaults:{annualRevenue:2000000,profitMarginImpact:0.05},
+    labels:{annualRevenue:"Annual Revenue ($)",profitMarginImpact:"Profit Margin Impact (%)"}, noFteCost:true },
+  { v:"revenue_pct", l:"Revenue Impact", d:"Revenue Impact % × Annual Revenue",
+    defaults:{annualRevenue:1000000,revenueImpact:0.05},
+    labels:{annualRevenue:"Annual Revenue ($)",revenueImpact:"Revenue Impact (%)"}, noFteCost:true },
+  { v:"deprecate_software", l:"Deprecate Software", d:"Annual cost avoided per year (one field per year).",
+    defaults:{year1Cost:0,year2Cost:0,year3Cost:0,year4Cost:0,year5Cost:0},
+    labels:{year1Cost:"Year 1 Cost ($)",year2Cost:"Year 2 Cost ($)",year3Cost:"Year 3 Cost ($)",year4Cost:"Year 4 Cost ($)",year5Cost:"Year 5 Cost ($)"}, noFteCost:true },
 ];
 
 /* ═══ INDUSTRY BENCHMARKS ═══ */
@@ -91,7 +199,6 @@ const INDUSTRY_BENCHMARKS = {
   "lib_dupe": {benchmark:"3-8 hrs/week",source:"Forrester"},
   "lib_triage": {benchmark:"4-10 hrs/week",source:"Tech benchmarks"},
   "lib_ripple": {benchmark:"2-6 incidents/month",source:"Cloud benchmarks"},
-  "lib_sync": {benchmark:"4-12 hrs/week",source:"Integration study"},
   "lib_data_risk": {benchmark:"$100K-$500K",source:"NIST, 2024"},
   "lib_audit": {benchmark:"40-80 hours",source:"SOX benchmarks"},
   "lib_security": {benchmark:"$500K-$5M",source:"IBM/Ponemon, 2024"},
@@ -107,96 +214,109 @@ const INDUSTRY_BENCHMARKS = {
 
 /* ═══ DRIVER LIBRARY ═══ */
 const DRIVER_LIBRARY = [
-  { cat:"Productivity", items:[
+  { cat:"Productivity Gains", items:[
     { id:"lib_report", name:"Reporting & Dashboard Time", type:"time", tip:"Time saved replacing manual reporting cycles with real-time Wrike dashboards.",
-      inputs:{people:4,hoursPerCycle:10,cyclesPerYear:12,reduction:0.70}, labels:{people:"People in Reporting",hoursPerCycle:"Hours / Person / Cycle",cyclesPerYear:"Cycles / Year",reduction:"% Reduction"},
+      inputs:{people:4,hoursPerCycle:10,cyclesPerYear:12,reduction:0.70,fteCost:100000}, labels:{people:"People in Reporting",hoursPerCycle:"Hours / Person / Cycle",cyclesPerYear:"Cycles / Year",reduction:"% Reduction",fteCost:"Fully-Loaded FTE Cost"},
       kpis:["Reporting cycle time (days)","Hours spent on manual report assembly per month"] },
     { id:"lib_approval", name:"Approval Cycle Delays", type:"time", tip:"Time wasted in multi-step approval processes due to lack of visibility, manual handoffs, and email chains.",
-      inputs:{people:6,hoursPerCycle:4,cyclesPerYear:24,reduction:0.55}, labels:{people:"People in Approval Chain",hoursPerCycle:"Hours Lost / Person / Cycle",cyclesPerYear:"Approval Cycles / Year",reduction:"% Reduction"},
+      inputs:{people:6,hoursPerCycle:4,cyclesPerYear:24,reduction:0.55,fteCost:100000}, labels:{people:"People in Approval Chain",hoursPerCycle:"Hours Lost / Person / Cycle",cyclesPerYear:"Approval Cycles / Year",reduction:"% Reduction",fteCost:"Fully-Loaded FTE Cost"},
       kpis:["Average approval turnaround time (hours)","% of approvals completed within SLA"] },
     { id:"lib_status", name:"Status Meeting Overhead", type:"time", tip:"Hours spent in status update meetings that could be replaced by real-time Wrike dashboards.",
-      inputs:{people:8,hoursPerCycle:3,cyclesPerYear:52,reduction:0.60}, labels:{people:"Attendees",hoursPerCycle:"Hours / Meeting",cyclesPerYear:"Meetings / Year",reduction:"% Reduction"},
+      inputs:{people:8,hoursPerCycle:3,cyclesPerYear:52,reduction:0.60,fteCost:100000}, labels:{people:"Attendees",hoursPerCycle:"Hours / Meeting",cyclesPerYear:"Meetings / Year",reduction:"% Reduction",fteCost:"Fully-Loaded FTE Cost"},
       kpis:["Number of recurring status meetings per week","Average meeting duration (minutes)"] },
     { id:"lib_search", name:"Information Search Time", type:"time", tip:"Time people spend searching for files, project status, or task details across fragmented tools.",
-      inputs:{people:10,hoursPerCycle:2,cyclesPerYear:52,reduction:0.65}, labels:{people:"People Searching",hoursPerCycle:"Hours / Week / Person",cyclesPerYear:"Weeks / Year",reduction:"% Reduction"},
+      inputs:{people:10,hoursPerCycle:2,cyclesPerYear:52,reduction:0.65,fteCost:100000}, labels:{people:"People Searching",hoursPerCycle:"Hours / Person / Cycle",cyclesPerYear:"Weeks / Year",reduction:"% Reduction",fteCost:"Fully-Loaded FTE Cost"},
       kpis:["Time to find project status (minutes)","% of requests answered via self-service dashboards"] },
     { id:"lib_onboard", name:"Onboarding & Ramp Time", type:"time", tip:"Time to get new team members productive. Wrike templates reduce ramp-up.",
-      inputs:{people:5,hoursPerCycle:20,cyclesPerYear:4,reduction:0.40}, labels:{people:"New Hires / Year",hoursPerCycle:"Extra Hours per Hire",cyclesPerYear:"Hire Cycles / Year",reduction:"% Reduction"},
+      inputs:{people:5,hoursPerCycle:20,cyclesPerYear:4,reduction:0.40,fteCost:100000}, labels:{people:"New Hires / Year",hoursPerCycle:"Extra Hours per Hire",cyclesPerYear:"Hire Cycles / Year",reduction:"% Reduction",fteCost:"Fully-Loaded FTE Cost"},
       kpis:["New hire time-to-productivity (days)","Onboarding task completion rate (%)"] },
     { id:"lib_dupe", name:"Duplicate Data Entry", type:"time", tip:"Hours re-entering data across systems because tools don't talk to each other.",
-      inputs:{people:5,hoursPerCycle:3,cyclesPerYear:52,reduction:0.80}, labels:{people:"People Affected",hoursPerCycle:"Hours / Week / Person",cyclesPerYear:"Weeks / Year",reduction:"% Reduction"},
+      inputs:{people:5,hoursPerCycle:3,cyclesPerYear:52,reduction:0.80,fteCost:100000}, labels:{people:"People Affected",hoursPerCycle:"Hours / Person / Cycle",cyclesPerYear:"Weeks / Year",reduction:"% Reduction",fteCost:"Fully-Loaded FTE Cost"},
       kpis:["Number of systems requiring manual data entry","Data entry errors per month"] },
   ]},
-  { cat:"Integration & Tool Sprawl", items:[
-    { id:"lib_triage", name:"Integration Troubleshooting", type:"time", tip:"Hours reclaimed from diagnosing and fixing integration failures between disconnected tools.",
-      inputs:{people:3,hoursPerCycle:6,cyclesPerYear:52,reduction:0.80}, labels:{people:"Triage Team Size",hoursPerCycle:"Hours / Week / Person",cyclesPerYear:"Weeks / Year",reduction:"% Reduction"},
+  { cat:"Software Consolidation", items:[
+    { id:"lib_triage", name:"Integration Support & Maintenance", type:"time", tip:"Time spent maintaining, updating and troubleshooting integrations between systems.",
+      inputs:{people:3,hoursPerCycle:6,cyclesPerYear:52,reduction:0.80,fteCost:100000}, labels:{people:"Team Size",hoursPerCycle:"Hours / person",cyclesPerYear:"Weeks / Year",reduction:"% Reduction",fteCost:"Fully-Loaded FTE Cost"},
       kpis:["Integration incidents per month","Mean time to resolve integration failures (hours)"] },
+    { id:"lib_eng_overhead", name:"Reduced Engineering Overhead", type:"time", tip:"Reduced engineering overhead primarily associated with the build, maintenance and upkeep of a homegrown software solution.",
+      inputs:{people:3,hoursPerCycle:6,cyclesPerYear:52,reduction:0.80,fteCost:100000}, labels:{people:"Team Size",hoursPerCycle:"Hours / person",cyclesPerYear:"Weeks / Year",reduction:"% Reduction",fteCost:"Fully-Loaded FTE Cost"},
+      kpis:["Hours per week on tool/admin overhead","Engineering capacity for delivery (%)"] },
     { id:"lib_ripple", name:"Downstream Rework from Failures", type:"incident", tip:"When integrations break, downstream teams must manually update and verify data.",
-      inputs:{people:12,hoursPerIncident:2,incidentsPerYear:24,recapture:0.65}, labels:{people:"People Affected",hoursPerIncident:"Hours / Person / Incident",incidentsPerYear:"Incidents / Year",recapture:"Recapture Rate"},
+      inputs:{people:12,hoursPerIncident:2,incidentsPerYear:24,recapture:0.65,fteCost:100000}, labels:{people:"People Affected",hoursPerIncident:"Hours / Person / Incident",incidentsPerYear:"Incidents / Year",recapture:"Recapture Rate",fteCost:"Fully-Loaded FTE Cost"},
       kpis:["Downstream rework hours per incident","% of data synced automatically vs manually"] },
-    { id:"lib_sync", name:"Manual Data Syncing", type:"time", tip:"Time spent manually copying or reconciling data between systems.",
-      inputs:{people:4,hoursPerCycle:5,cyclesPerYear:52,reduction:0.75}, labels:{people:"People Syncing",hoursPerCycle:"Hours / Week / Person",cyclesPerYear:"Weeks / Year",reduction:"% Reduction"},
-      kpis:["Systems requiring manual sync","Hours spent on data reconciliation per week"] },
+    { id:"lib_deprecate", name:"Deprecate Software", type:"deprecate_software", tip:"Estimated annual cost avoided by deprecating or consolidating software (savings per year).",
+      inputs:{year1Cost:0,year2Cost:0,year3Cost:0,year4Cost:0,year5Cost:0}, labels:{year1Cost:"Year 1 Cost ($)",year2Cost:"Year 2 Cost ($)",year3Cost:"Year 3 Cost ($)",year4Cost:"Year 4 Cost ($)",year5Cost:"Year 5 Cost ($)"},
+      kpis:["Software licenses retired","Annual cost avoided"] },
   ]},
   { cat:"Risk & Compliance", items:[
     { id:"lib_data_risk", name:"Data Governance Risk", type:"risk", tip:"Insurance value of preventing accidental data sharing or compliance violations.",
-      inputs:{costPerIncident:250000,probCurrent:0.10,probWrike:0.02}, labels:{costPerIncident:"Cost Per Incident",probCurrent:"Probability Today",probWrike:"Probability with Wrike"},
+      inputs:{costPerIncident:250000,probCurrent:0.10,probWrike:0.02,fteCost:100000}, labels:{costPerIncident:"Cost Per Incident",probCurrent:"Probability Today",probWrike:"Probability with Wrike",fteCost:"Fully-Loaded FTE Cost"},
       kpis:["Data access policy violations per quarter","% of workspaces with proper access controls"] },
     { id:"lib_audit", name:"Audit Prep Reduction", type:"time", tip:"Hours saved replacing manual data scrubbing for audits with immutable audit trails.",
-      inputs:{people:3,hoursPerCycle:40,cyclesPerYear:2,reduction:0.65}, labels:{people:"Audit Prep Team",hoursPerCycle:"Hours / Person / Audit",cyclesPerYear:"Audits / Year",reduction:"% Reduction"},
+      inputs:{people:3,hoursPerCycle:40,cyclesPerYear:2,reduction:0.65,fteCost:100000}, labels:{people:"Audit Prep Team",hoursPerCycle:"Hours / Person / Audit",cyclesPerYear:"Audits / Year",reduction:"% Reduction",fteCost:"Fully-Loaded FTE Cost"},
       kpis:["Audit prep hours per cycle","Days from audit request to evidence delivery"] },
     { id:"lib_security", name:"Security Breach Exposure", type:"risk", tip:"Risk reduction from consolidating onto a governed platform with role-based access.",
-      inputs:{costPerIncident:500000,probCurrent:0.08,probWrike:0.02}, labels:{costPerIncident:"Cost Per Breach",probCurrent:"Probability Today",probWrike:"Probability with Wrike"},
+      inputs:{costPerIncident:500000,probCurrent:0.08,probWrike:0.02,fteCost:100000}, labels:{costPerIncident:"Cost Per Breach",probCurrent:"Probability Today",probWrike:"Probability with Wrike",fteCost:"Fully-Loaded FTE Cost"},
       kpis:["Security incidents per year","% of users on governed platform vs shadow IT"] },
   ]},
   { cat:"Quality & Rework", items:[
     { id:"lib_rework", name:"Rework from Miscommunication", type:"incident", tip:"Time redoing work because requirements or changes were lost between tools.",
-      inputs:{people:8,hoursPerIncident:3,incidentsPerYear:24,recapture:0.55}, labels:{people:"People Affected",hoursPerIncident:"Hours / Incident",incidentsPerYear:"Incidents / Year",recapture:"Recapture Rate"},
+      inputs:{people:8,hoursPerIncident:3,incidentsPerYear:24,recapture:0.55,fteCost:100000}, labels:{people:"People Affected",hoursPerIncident:"Hours / Incident",incidentsPerYear:"Incidents / Year",recapture:"Recapture Rate",fteCost:"Fully-Loaded FTE Cost"},
       kpis:["Rework incidents per month","% of deliverables requiring revision"] },
     { id:"lib_deadline", name:"Missed Deadline Recovery", type:"incident", tip:"Cost of recovering from missed deadlines due to poor visibility.",
-      inputs:{people:5,hoursPerIncident:6,incidentsPerYear:12,recapture:0.50}, labels:{people:"People Involved",hoursPerIncident:"Hours / Incident",incidentsPerYear:"Misses / Year",recapture:"Recapture Rate"},
+      inputs:{people:5,hoursPerIncident:6,incidentsPerYear:12,recapture:0.50,fteCost:100000}, labels:{people:"People Involved",hoursPerIncident:"Hours / Incident",incidentsPerYear:"Misses / Year",recapture:"Recapture Rate",fteCost:"Fully-Loaded FTE Cost"},
       kpis:["% of projects delivered on time","Average days overdue per missed deadline"] },
     { id:"lib_scope", name:"Scope Creep Impact", type:"time", tip:"Extra hours when projects expand beyond scope due to poor requirement tracking.",
-      inputs:{people:4,hoursPerCycle:8,cyclesPerYear:6,reduction:0.45}, labels:{people:"People Affected",hoursPerCycle:"Extra Hours / Project",cyclesPerYear:"Projects / Year",reduction:"% Reduction"},
+      inputs:{people:4,hoursPerCycle:8,cyclesPerYear:6,reduction:0.45,fteCost:100000}, labels:{people:"People Affected",hoursPerCycle:"Extra Hours / Project",cyclesPerYear:"Projects / Year",reduction:"% Reduction",fteCost:"Fully-Loaded FTE Cost"},
       kpis:["% of projects with scope changes","Budget variance from original estimate (%)"] },
   ]},
   { cat:"Revenue & Strategic", items:[
     { id:"lib_ttm", name:"Faster Time-to-Market", type:"revenue", tip:"Revenue gained by launching products/campaigns faster through better project execution.",
-      inputs:{annualValue:1000000,improvement:0.05}, labels:{annualValue:"Annual Revenue at Risk",improvement:"% Improvement"},
+      inputs:{annualValue:1000000,improvement:0.05,fteCost:100000}, labels:{annualValue:"Annual Revenue at Risk",improvement:"% Improvement",fteCost:"Fully-Loaded FTE Cost"},
       kpis:["Average project delivery time (days)","Time from concept to launch"] },
     { id:"lib_retention", name:"Client Retention & Satisfaction", type:"revenue", tip:"Revenue protected by improving delivery quality and client-facing project visibility.",
-      inputs:{annualValue:2000000,improvement:0.03}, labels:{annualValue:"Annual Client Revenue at Risk",improvement:"% Retention Improvement"},
+      inputs:{annualValue:2000000,improvement:0.03,fteCost:100000}, labels:{annualValue:"Annual Client Revenue at Risk",improvement:"% Retention Improvement",fteCost:"Fully-Loaded FTE Cost"},
       kpis:["Client satisfaction score (NPS/CSAT)","Client churn rate (%)"] },
     { id:"lib_capacity", name:"Capacity for Additional Work", type:"revenue", tip:"Revenue enabled by reclaimed capacity — team can take on more projects without hiring.",
-      inputs:{annualValue:500000,improvement:0.10}, labels:{annualValue:"Potential Additional Revenue",improvement:"% Capacity Unlocked"},
+      inputs:{annualValue:500000,improvement:0.10,fteCost:100000}, labels:{annualValue:"Potential Additional Revenue",improvement:"% Capacity Unlocked",fteCost:"Fully-Loaded FTE Cost"},
       kpis:["Projects delivered per quarter","Utilization rate (%)"] },
+    { id:"lib_customer_churn", name:"Customer Churn Impact", type:"customer_churn", tip:"Revenue at risk from customer churn that Wrike can help reduce through better delivery and visibility.",
+      inputs:{currentCustomers:100,avgRevenuePerCustomer:5000,churnImpact:0.10}, labels:{currentCustomers:"Current Customers (#)",avgRevenuePerCustomer:"Average Annual Revenue per Customer ($)",churnImpact:"Customer Churn Impact (%)"},
+      kpis:["Customer churn rate (%)","Annual recurring revenue at risk"] },
+    { id:"lib_profit_margin", name:"Profit Margin Impact", type:"profit_margin", tip:"Profit improvement from reduced rework, faster delivery, and better resource utilization.",
+      inputs:{annualRevenue:2000000,profitMarginImpact:0.05}, labels:{annualRevenue:"Annual Revenue ($)",profitMarginImpact:"Profit Margin Impact (%)"},
+      kpis:["Current profit margin (%)","Cost of poor execution as % of revenue"] },
+    { id:"lib_revenue_impact", name:"Revenue Impact", type:"revenue_pct", tip:"Direct revenue impact from faster time-to-market, better win rates, or additional capacity.",
+      inputs:{annualRevenue:1000000,revenueImpact:0.05}, labels:{annualRevenue:"Annual Revenue ($)",revenueImpact:"Revenue Impact (%)"},
+      kpis:["Revenue growth rate (%)","Revenue at risk from delays"] },
   ]},
   { cat:"Project Execution", items:[
     { id:"lib_proj_delay", name:"Project Delay Impact", type:"project_delay",
       tip:"Cost of projects that miss their go-live date. Captures delayed revenue, extended resource burn, and downstream business impact. Ask: 'What % of your projects slip, by how many days on average, and what does a single day of delay cost the business?'",
-      inputs:{projectsPerYear:24,delayRate:0.45,avgDelayDays:10,dailyCostOfDelay:1500,reductionRate:0.60},
-      labels:{projectsPerYear:"Projects / Year",delayRate:"% Projects Delayed",avgDelayDays:"Avg Days Late per Delayed Project",dailyCostOfDelay:"Daily Cost of Delay ($)",reductionRate:"% Reduction with Wrike"},
+      inputs:{projectsPerYear:24,delayRate:0.45,avgDelayDays:10,dailyCostOfDelay:1500,reductionRate:0.60,fteCost:100000},
+      labels:{projectsPerYear:"Projects / Year",delayRate:"% Projects Delayed",avgDelayDays:"Avg Days Late per Delayed Project",dailyCostOfDelay:"Daily Cost of Delay ($)",reductionRate:"% Reduction with Wrike",fteCost:"Fully-Loaded FTE Cost"},
       kpis:["% of projects delivered on or before go-live date","Average days late per delayed project","Number of projects delayed per quarter"] },
     { id:"lib_proj_resource", name:"Resource Conflicts Across Projects", type:"incident",
       tip:"Cost of projects stalled because key people are double-booked across concurrent work. Without visibility into who is working on what, teams can't plan around capacity — causing delays and dropped handoffs. NOTE: Enter total team hours lost per conflict in the hours field — not per-person hours. Example: if 3 people each lose 2 hours when a conflict occurs, enter 6.",
-      inputs:{people:12,hoursPerIncident:4,incidentsPerYear:24,recapture:0.55},
-      labels:{people:"Projects Impacted / Year",hoursPerIncident:"Avg Hours Lost per Conflict",incidentsPerYear:"Resource Conflicts / Year",recapture:"% Recaptured with Wrike"},
+      inputs:{people:12,hoursPerIncident:4,incidentsPerYear:24,recapture:0.55,fteCost:100000},
+      labels:{people:"Projects Impacted / Year",hoursPerIncident:"Avg Hours Lost per Conflict",incidentsPerYear:"Resource Conflicts / Year",recapture:"% Recaptured with Wrike",fteCost:"Fully-Loaded FTE Cost"},
       kpis:["% of projects impacted by resource conflicts","Average days lost to resource contention","Resource utilization rate (%)"] },
   ]},
 ];
 
 const COLORS = ["#8b5cf6","#06b6d4","#0891b2","#f59e0b","#d97706","#10b981","#ec4899","#6366f1","#14b8a6","#f97316","#84cc16","#a855f7"];
-const CAT_COLORS = {"Productivity":"#8b5cf6","Integration & Tool Sprawl":"#06b6d4","Risk & Compliance":"#f59e0b","Quality & Rework":"#ec4899","Revenue & Strategic":"#10b981","Project Execution":"#0ea5e9"};
+const CAT_COLORS = {"Productivity Gains":"#8b5cf6","Software Consolidation":"#06b6d4","Risk & Compliance":"#f59e0b","Quality & Rework":"#ec4899","Revenue & Strategic":"#10b981","Project Execution":"#0ea5e9"};
 
 const DEFAULT_GLOBALS = {
   customerName:"", currency:"$", horizon:3,
-  legacyFullCost:121780,
-  legacyPhaseDown:[84800, 21600, 21600, 0, 0],
-  fteAvoided:1.5, fteAvoidY1:false,
-  wrikeCostByYear:[81000, 94500, 108000, 121500, 135000],
-  wrikeProfServices:15087, wrikeMigration:0,
+  legacyFullCost:0,
+  legacyPhaseDown:[0, 0, 0, 0, 0],
+  legacySavingsEnabled:false, fteAvoidanceEnabled:false,
+  fteAvoided:0, fteAvoidY1:false,
+  wrikeCostByYear:[0, 0, 0, 0, 0],
+  wrikeProfServices:0, wrikeMigration:0,
   wrikeAdditionalSKUs:[],
-  fteCost:100000, headcountGrowth:0.075, adoptionRamp:6,
+  fteCost:0, headcountGrowth:0.075, adoptionRamp:6,
   discountEnabled:false, discountRate:0.08,
 };
 
@@ -216,25 +336,19 @@ const fmt = (n) => { const a=Math.abs(Math.round(n));const s=a.toLocaleString("e
 const fmtK = (n) => { const a=Math.abs(n);if(a>=1e6)return`${_cur}${(n/1e6).toFixed(1)}M`;if(a>=100000)return`${_cur}${(n/1e3).toFixed(0)}K`;if(a>=1e3)return`${_cur}${(n/1e3).toFixed(1)}K`;return`${_cur}${Math.round(n)}`; };
 const pct = (n) => `${(n*100).toFixed(1)}%`;
 
-function calcDriver(d, hr, af) {
+function calcDriver(d, af, year) {
   if (!d.enabled) return 0; const i=d.inputs;
+  const hr=(i.fteCost!=null?i.fteCost:100000)/2080;
   switch (d.type) {
     case "time": return i.people*i.hoursPerCycle*i.cyclesPerYear*hr*i.reduction*af;
     case "incident": return i.people*i.hoursPerIncident*i.incidentsPerYear*hr*i.recapture*af;
     case "risk": return (i.costPerIncident*i.probCurrent)-(i.costPerIncident*i.probWrike);
     case "revenue": return i.annualValue*i.improvement*af;
     case "project_delay": return i.projectsPerYear*i.delayRate*i.avgDelayDays*i.dailyCostOfDelay*i.reductionRate*af;
-    default: return 0;
-  }
-}
-function calcCoi(d, hr) {
-  if (!d.enabled) return 0; const i=d.inputs;
-  switch (d.type) {
-    case "time": return i.people*i.hoursPerCycle*i.cyclesPerYear*hr;
-    case "incident": return i.people*i.hoursPerIncident*i.incidentsPerYear*hr;
-    case "risk": return i.costPerIncident*i.probCurrent;
-    case "revenue": return i.annualValue*i.improvement;
-    case "project_delay": return i.projectsPerYear*i.delayRate*i.avgDelayDays*i.dailyCostOfDelay;
+    case "customer_churn": return (i.churnImpact||0)*(i.currentCustomers||0)*(i.avgRevenuePerCustomer||0)*af;
+    case "profit_margin": return (i.profitMarginImpact||0)*(i.annualRevenue||0)*af;
+    case "revenue_pct": return (i.revenueImpact||0)*(i.annualRevenue||0)*af;
+    case "deprecate_software": return year!=null?(i["year"+year+"Cost"]||0):0;
     default: return 0;
   }
 }
@@ -251,7 +365,7 @@ const fmtHrs = (n) => { const r=Math.round(n); if(r>=1000) return `${(r/1000).to
 function exportCSV(model, drivers, g, scenarios, scenarioResults, kpis) {
   if(typeof XLSX==="undefined"){alert("Export requires browser.");return;}
   const CUR=g.currency||"$";const CF=CUR+"#,##0";
-  const el=drivers.filter(d=>d.enabled);const hr=g.fteCost/2080;const H=g.horizon;
+  const el=drivers.filter(d=>d.enabled);const H=g.horizon;
   const wb=XLSX.utils.book_new();
   
   /* ── Styles ── */
@@ -287,8 +401,8 @@ function exportCSV(model, drivers, g, scenarios, scenarioResults, kpis) {
   
   /* Determine input style based on field name */
   function inputStyle(k){
-    if(k.includes("prob")||k.includes("recapture")||k.includes("reduction")||k.includes("improvement")||k.includes("Growth")||k==="delayRate"||k==="reductionRate")return S.inpP;
-    if(k.includes("cost")||k.includes("Cost")||k.includes("Value")||k.includes("value")||k==="annualValue"||k==="dailyCostOfDelay")return S.inp$;
+    if(k.includes("prob")||k.includes("recapture")||k.includes("reduction")||k.includes("improvement")||k.includes("Growth")||k==="delayRate"||k==="reductionRate"||k==="churnImpact"||k==="profitMarginImpact"||k==="revenueImpact")return S.inpP;
+    if(k.includes("cost")||k.includes("Cost")||k.includes("Value")||k.includes("value")||k==="annualValue"||k==="dailyCostOfDelay"||k==="avgRevenuePerCustomer"||k==="annualRevenue"||/^year\d+Cost$/.test(k))return S.inp$;
     return S.inpN;  /* people, hours, cycles, incidents, projects, days = plain number */
   }
   
@@ -311,28 +425,13 @@ function exportCSV(model, drivers, g, scenarios, scenarioResults, kpis) {
     r++;
   });
   
-  sc(ws1,r,0,"LEGACY TOOL COSTS",S.sec);sc(ws1,r,1,"",S.sec);sc(ws1,r,2,"",S.sec);r++;
-  aRef.legacyFull="Assumptions!$B$"+(r+1);
-  sc(ws1,r,0,"Current Annual Cost (do-nothing)",S.lbl);sc(ws1,r,1,g.legacyFullCost,S.inp$);sc(ws1,r,2,"What you'd pay if nothing changes",S.note);r++;
-  for(let i=0;i<H;i++){
-    aRef["phaseDown"+i]="Assumptions!$B$"+(r+1);
-    sc(ws1,r,0,"Year "+(i+1)+" Legacy Cost (with Wrike)",S.lbl);sc(ws1,r,1,g.legacyPhaseDown[i]||0,S.inp$);
-    const sav=g.legacyFullCost-(g.legacyPhaseDown[i]||0);
-    sc(ws1,r,2,"Savings: $"+Math.max(0,sav).toLocaleString(),S.note);r++;
-  }
-  r++;
-  
-  sc(ws1,r,0,"FTE AVOIDANCE",S.sec);sc(ws1,r,1,"",S.sec);sc(ws1,r,2,"",S.sec);r++;
-  aRef.fteAvoided="Assumptions!$B$"+(r+1);
-  sc(ws1,r,0,"FTEs Avoided / Year",S.lbl);sc(ws1,r,1,g.fteAvoided,S.inpD);sc(ws1,r,2,g.fteAvoidY1?"Included Y1 (prorated)":"Starts Year 2",S.note);r+=2;
-  
   sc(ws1,r,0,"WRIKE INVESTMENT",S.sec);sc(ws1,r,1,"",S.sec);sc(ws1,r,2,"",S.sec);r++;
   for(let i=0;i<H;i++){
     aRef["wrikeCost"+i]="Assumptions!$B$"+(r+1);
     sc(ws1,r,0,"Year "+(i+1)+" Wrike License",S.lbl);sc(ws1,r,1,g.wrikeCostByYear[i]||0,S.inp$);r++;
   }
   aRef.profSvc="Assumptions!$B$"+(r+1);
-  sc(ws1,r,0,"Prof Services (Y1)",S.lbl);sc(ws1,r,1,g.wrikeProfServices,S.inp$);r++;
+  sc(ws1,r,0,"Professional Services (Y1)",S.lbl);sc(ws1,r,1,g.wrikeProfServices,S.inp$);r++;
   aRef.migration="Assumptions!$B$"+(r+1);
   if(g.wrikeMigration>0){sc(ws1,r,0,"Migration (Y1)",S.lbl);sc(ws1,r,1,g.wrikeMigration,S.inp$);r++;}
   g.wrikeAdditionalSKUs.forEach((sku,si)=>{
@@ -345,14 +444,8 @@ function exportCSV(model, drivers, g, scenarios, scenarioResults, kpis) {
   r++;
   
   sc(ws1,r,0,"SHARED ASSUMPTIONS",S.sec);sc(ws1,r,1,"",S.sec);sc(ws1,r,2,"",S.sec);r++;
-  aRef.fteCost="Assumptions!$B$"+(r+1);
-  sc(ws1,r,0,"Fully-Loaded FTE Cost",S.lbl);sc(ws1,r,1,g.fteCost,S.inp$);r++;
-  aRef.hrRate="Assumptions!$B$"+(r+1);
-  sc(ws1,r,0,"Hourly Rate (derived)",S.lbl);sf(ws1,r,1,"="+aRef.fteCost.replace("Assumptions!","")+"/2080",S.hr);sc(ws1,r,2,"= FTE Cost / 2,080 hours",S.note);r++;
   aRef.adoptionRamp="Assumptions!$B$"+(r+1);
   sc(ws1,r,0,"Adoption Ramp (months)",S.lbl);sc(ws1,r,1,g.adoptionRamp,S.inpN);r++;
-  aRef.hcGrowth="Assumptions!$B$"+(r+1);
-  sc(ws1,r,0,"Headcount Growth",S.lbl);sc(ws1,r,1,g.headcountGrowth,S.inpP);sc(ws1,r,2,"Cost of Inaction only",S.note);r++;
   
   ws1["!ref"]="A1:C"+(r+1);
   XLSX.utils.book_append_sheet(wb,ws1,"Assumptions");
@@ -379,7 +472,7 @@ function exportCSV(model, drivers, g, scenarios, scenarioResults, kpis) {
   for(let i=0;i<H;i++)sf(ws2,r,i+1,"="+aRef["wrikeCost"+i],S.$);
   sf(ws2,r,tCol,"=SUM("+cn(1)+(r+1)+":"+cn(H)+(r+1)+")",S.$);r++;
 
-  sc(ws2,r,0,"Prof Services",S.lbl);
+  sc(ws2,r,0,"Professional Services",S.lbl);
   sf(ws2,r,1,"="+aRef.profSvc,S.$);for(let i=1;i<H;i++)sc(ws2,r,i+1,0,S.$);
   sf(ws2,r,tCol,"=SUM("+cn(1)+(r+1)+":"+cn(H)+(r+1)+")",S.$);r++;
 
@@ -411,26 +504,28 @@ function exportCSV(model, drivers, g, scenarios, scenarioResults, kpis) {
   sc(ws2,r,0,"Adoption Factor",S.lbl);
   sf(ws2,r,1,"=MAX(0,(12-"+aRef.adoptionRamp+")/12)",S.p);
   for(let i=1;i<H;i++)sc(ws2,r,i+1,1,S.p);
-  const afRow=r;r++;
+  const afRow=r;r+=2;
   
-  sc(ws2,r,0,"Hourly Rate (calculated)",S.lbl);
-  for(let i=0;i<H;i++)sf(ws2,r,i+1,"="+aRef.fteCost+"/2080",S.hr);
-  const hrRow=r;r+=2;
-  
-  /* Driver rows */
+  /* Driver rows — each driver uses its own FTE cost (aRef["d"+di+"_fteCost"]) for time/incident */
   const dRows=[];
   const hRows=[];
   el.forEach((d,di)=>{
     sc(ws2,r,0,d.name,S.drv(d.color));r++;
     sc(ws2,r,0,d.name+" — Value ($)",S.lbl);
+    const fteRef=aRef["d"+di+"_fteCost"];
+    const hrPart=fteRef?"("+fteRef+"/2080)":"(100000/2080)";
     for(let yi=0;yi<H;yi++){
-      const c=yi+1;const af=cn(c)+(afRow+1);const hrc=cn(c)+(hrRow+1);
+      const c=yi+1;const af=cn(c)+(afRow+1);
       let f="";
-      if(d.type==="time")f="="+aRef["d"+di+"_people"]+"*"+aRef["d"+di+"_hoursPerCycle"]+"*"+aRef["d"+di+"_cyclesPerYear"]+"*"+hrc+"*"+aRef["d"+di+"_reduction"]+"*"+af;
-      else if(d.type==="incident")f="="+aRef["d"+di+"_people"]+"*"+aRef["d"+di+"_hoursPerIncident"]+"*"+aRef["d"+di+"_incidentsPerYear"]+"*"+hrc+"*"+aRef["d"+di+"_recapture"]+"*"+af;
+      if(d.type==="time")f="="+aRef["d"+di+"_people"]+"*"+aRef["d"+di+"_hoursPerCycle"]+"*"+aRef["d"+di+"_cyclesPerYear"]+"*"+hrPart+"*"+aRef["d"+di+"_reduction"]+"*"+af;
+      else if(d.type==="incident")f="="+aRef["d"+di+"_people"]+"*"+aRef["d"+di+"_hoursPerIncident"]+"*"+aRef["d"+di+"_incidentsPerYear"]+"*"+hrPart+"*"+aRef["d"+di+"_recapture"]+"*"+af;
       else if(d.type==="risk")f="=("+aRef["d"+di+"_costPerIncident"]+"*"+aRef["d"+di+"_probCurrent"]+")-("+aRef["d"+di+"_costPerIncident"]+"*"+aRef["d"+di+"_probWrike"]+")";
       else if(d.type==="revenue")f="="+aRef["d"+di+"_annualValue"]+"*"+aRef["d"+di+"_improvement"]+"*"+af;
       else if(d.type==="project_delay")f="="+aRef["d"+di+"_projectsPerYear"]+"*"+aRef["d"+di+"_delayRate"]+"*"+aRef["d"+di+"_avgDelayDays"]+"*"+aRef["d"+di+"_dailyCostOfDelay"]+"*"+aRef["d"+di+"_reductionRate"]+"*"+af;
+      else if(d.type==="customer_churn")f="="+aRef["d"+di+"_churnImpact"]+"*"+aRef["d"+di+"_currentCustomers"]+"*"+aRef["d"+di+"_avgRevenuePerCustomer"]+"*"+af;
+      else if(d.type==="profit_margin")f="="+aRef["d"+di+"_profitMarginImpact"]+"*"+aRef["d"+di+"_annualRevenue"]+"*"+af;
+      else if(d.type==="revenue_pct")f="="+aRef["d"+di+"_revenueImpact"]+"*"+aRef["d"+di+"_annualRevenue"]+"*"+af;
+      else if(d.type==="deprecate_software")f="="+aRef["d"+di+"_year"+(yi+1)+"Cost"];
       sf(ws2,r,c,f,S.$);
     }
     sf(ws2,r,tCol,"=SUM("+cn(1)+(r+1)+":"+cn(H)+(r+1)+")",S.tot);
@@ -456,19 +551,6 @@ function exportCSV(model, drivers, g, scenarios, scenarioResults, kpis) {
   });
   
   r++;
-  sc(ws2,r,0,"LEGACY TOOL(S) SAVINGS",S.drv("#10b981"));r++;
-  sc(ws2,r,0,"Legacy Tool Savings",S.lbl);
-  for(let i=0;i<H;i++)sf(ws2,r,i+1,"="+aRef.legacyFull+"-"+aRef["phaseDown"+i],S.$);
-  sf(ws2,r,tCol,"=SUM("+cn(1)+(r+1)+":"+cn(H)+(r+1)+")",S.tot);
-  const lsRow=r;r+=2;
-  
-  sc(ws2,r,0,"FTE AVOIDANCE",S.drv("#059669"));r++;
-  sc(ws2,r,0,"FTE Avoidance",S.lbl);
-  if(g.fteAvoidY1)sf(ws2,r,1,"="+aRef.fteAvoided+"*"+aRef.fteCost+"*"+cn(1)+(afRow+1),S.$);
-  else sc(ws2,r,1,0,S.$);
-  for(let i=1;i<H;i++)sf(ws2,r,i+1,"="+aRef.fteAvoided+"*"+aRef.fteCost,S.$);
-  sf(ws2,r,tCol,"=SUM("+cn(1)+(r+1)+":"+cn(H)+(r+1)+")",S.tot);
-  const feRow=r;r+=2;
 
   /* TOTAL HOURS REGAINED - purple summary row */
   if(hRows.length>0){
@@ -486,7 +568,7 @@ function exportCSV(model, drivers, g, scenarios, scenarioResults, kpis) {
   /* TOTAL BENEFIT - highlighted */
   sc(ws2,r,0,"TOTAL BENEFIT",{font:{bold:true,sz:10,color:{rgb:"059669"},name:"Arial"},fill:{fgColor:{rgb:"F0FDF4"}}});
   for(let i=0;i<H;i++){
-    const parts=[...dRows.map(dr=>cn(i+1)+(dr+1)),cn(i+1)+(lsRow+1),cn(i+1)+(feRow+1)];
+    const parts=[...dRows.map(dr=>cn(i+1)+(dr+1))];
     sf(ws2,r,i+1,"="+parts.join("+"),S.totGbg);
   }
   sf(ws2,r,tCol,"=SUM("+cn(1)+(r+1)+":"+cn(H)+(r+1)+")",S.totGbg);
@@ -505,58 +587,11 @@ function exportCSV(model, drivers, g, scenarios, scenarioResults, kpis) {
   sc(ws2,r,0,"Cumulative ROI",S.bold);sc(ws2,r,1,model.roi,{font:{bold:true,sz:10,color:{rgb:"0369A1"},name:"Arial"},numFmt:"0.0%",alignment:{horizontal:"right"}});r++;
   sc(ws2,r,0,"Payback Period",S.bold);sc(ws2,r,1,model.pbm?model.pbm+" months":"N/A",S.bold);r++;
   sc(ws2,r,0,"Total Hours Regained",S.bold);sc(ws2,r,1,Math.round(model.totalHours),{font:{bold:true,sz:10,color:{rgb:"7C3AED"},name:"Arial"},numFmt:"#,##0",alignment:{horizontal:"right"}});r++;
-  sc(ws2,r,0,"Cost of Inaction ("+H+"yr)",S.bold);sc(ws2,r,1,Math.round(model.coiTotal),S.totR);r++;
   
   ws2["!ref"]="A1:"+cn(tCol)+(r+1);
   XLSX.utils.book_append_sheet(wb,ws2,H+"-Year Model");
   
-  /* ═══ TAB 3: COST OF INACTION ═══ */
-  const ws3={};r=0;
-  ws3["!cols"]=[{wch:35},...Array(H).fill({wch:15}),{wch:15}];
-  for(let i=0;i<=tCol;i++)sc(ws3,r,i,"",S.hdr);
-  sc(ws3,r,0,"COST OF INACTION — WHAT HAPPENS IF YOU DO NOTHING?",S.hdr);r++;
-  sc(ws3,r,0,"",{fill:{fgColor:{rgb:"334155"}}});
-  for(let i=0;i<H;i++)sc(ws3,r,i+1,"Year "+(i+1),S.yrH);
-  sc(ws3,r,tCol,"Total",{font:{bold:true,sz:10,color:{rgb:"FFFFFF"},name:"Arial"},fill:{fgColor:{rgb:"DC2626"}},alignment:{horizontal:"right"}});r++;
-  
-  const coiItems=[
-    ["Legacy Tools (full cost)","coiSS"],
-  ];
-  coiItems.forEach(([label,k])=>{
-    sc(ws3,r,0,label,S.lbl);
-    for(let i=0;i<H;i++)sc(ws3,r,i+1,Math.round(model.years[Math.min(i,model.years.length-1)][k]),S.$);
-    sf(ws3,r,tCol,"=SUM("+cn(1)+(r+1)+":"+cn(H)+(r+1)+")",S.totR);r++;
-  });
-  /* Per-driver cost of inaction lines */
-  el.forEach(d=>{
-    const coiLabel=d.type==="risk"?"compliance risk exposure":d.type==="revenue"?"unrealized revenue":d.type==="incident"?"incident recovery cost":d.type==="project_delay"?"project delay cost":"wasted productivity";
-    sc(ws3,r,0,d.name+" ("+coiLabel+")",S.lbl);
-    for(let i=0;i<H;i++){
-      const yData=model.years[Math.min(i,model.years.length-1)];
-      sc(ws3,r,i+1,Math.round(yData.coiByDriver?yData.coiByDriver[d.id]||0:0),S.$);
-    }
-    sf(ws3,r,tCol,"=SUM("+cn(1)+(r+1)+":"+cn(H)+(r+1)+")",S.totR);r++;
-  });
-  /* Additional FTEs */
-  sc(ws3,r,0,"Additional FTEs for Growth",S.lbl);
-  for(let i=0;i<H;i++)sc(ws3,r,i+1,Math.round(model.years[Math.min(i,model.years.length-1)].coiFTE),S.$);
-  sf(ws3,r,tCol,"=SUM("+cn(1)+(r+1)+":"+cn(H)+(r+1)+")",S.totR);r++;
-  
-  /* Total row - highlighted */
-  sc(ws3,r,0,"TOTAL COST OF INACTION",{font:{bold:true,sz:10,color:{rgb:"DC2626"},name:"Arial"},fill:{fgColor:{rgb:"FEF2F2"}}});
-  for(let i=0;i<H;i++)sf(ws3,r,i+1,"=SUM("+cn(i+1)+"3:"+cn(i+1)+r+")",S.totRbg);
-  sf(ws3,r,tCol,"=SUM("+cn(1)+(r+1)+":"+cn(H)+(r+1)+")",S.totRbg);r+=2;
-  
-  /* Bottom line */
-  const annualCOI=Math.round(model.coiTotal/H);
-  sc(ws3,r,0,"Every year you wait, $"+annualCOI.toLocaleString()+" is lost to inefficiency, risk, and tools that aren't working.",S.bold);r++;
-  sc(ws3,r,0,"Over "+H+" years, that's $"+Math.round(model.coiTotal).toLocaleString()+" walking out the door.",{font:{bold:true,sz:10,color:{rgb:"DC2626"},name:"Arial"}});r++;
-  sc(ws3,r,0,"Wrike pays for itself in "+(model.pbm?model.pbm+" months":"under a year")+".",{font:{bold:true,sz:10,color:{rgb:"059669"},name:"Arial"}});r++;
-  
-  ws3["!ref"]="A1:"+cn(tCol)+(r+1);
-  XLSX.utils.book_append_sheet(wb,ws3,"Cost of Inaction");
-  
-  /* ═══ TAB 4: PRESALES BASELINE ═══ */
+  /* ═══ TAB 3: PRESALES BASELINE ═══ */
   const ws4={};r=0;
 
   /* Column widths: Driver | People | Hrs/Unit | Freq/Yr | Reduction% | Baseline Hrs/Yr | Goal Hrs/Yr | Hrs Saved/Yr | Annual $ Value */
@@ -677,6 +712,30 @@ function exportCSV(model, drivers, g, scenarios, scenarioResults, kpis) {
       /* Col I: Annual $ Value = days saved * daily cost */
       sf(ws4,r,8,"=H"+rowRef+"*"+aRef["d"+di+"_dailyCostOfDelay"],cell$);
       baseHrsRows.push(rowRef);goalHrsRows.push(rowRef);savedHrsRows.push(rowRef);dollarRows.push(rowRef);
+    } else if(d.type==="customer_churn"){
+      sf(ws4,r,1,"="+aRef["d"+di+"_currentCustomers"],cellN);
+      sf(ws4,r,2,"="+aRef["d"+di+"_avgRevenuePerCustomer"],{font:{sz:10,name:"Arial"},numFmt:"$#,##0",alignment:{horizontal:"right"}});
+      sf(ws4,r,3,"="+aRef["d"+di+"_churnImpact"],cellP);
+      sc(ws4,r,4,"—",cellNA);sc(ws4,r,5,"—",cellNA);sc(ws4,r,6,"—",cellNA);sc(ws4,r,7,"—",cellNA);
+      sf(ws4,r,8,"="+aRef["d"+di+"_churnImpact"]+"*"+aRef["d"+di+"_currentCustomers"]+"*"+aRef["d"+di+"_avgRevenuePerCustomer"],cell$);
+      dollarRows.push(rowRef);
+    } else if(d.type==="profit_margin"){
+      sf(ws4,r,1,"="+aRef["d"+di+"_annualRevenue"],{font:{sz:10,name:"Arial"},numFmt:"$#,##0",alignment:{horizontal:"right"}});
+      sf(ws4,r,2,"="+aRef["d"+di+"_profitMarginImpact"],cellP);
+      sc(ws4,r,3,"—",cellNA);sc(ws4,r,4,"—",cellNA);sc(ws4,r,5,"—",cellNA);sc(ws4,r,6,"—",cellNA);sc(ws4,r,7,"—",cellNA);
+      sf(ws4,r,8,"="+aRef["d"+di+"_profitMarginImpact"]+"*"+aRef["d"+di+"_annualRevenue"],cell$);
+      dollarRows.push(rowRef);
+    } else if(d.type==="revenue_pct"){
+      sf(ws4,r,1,"="+aRef["d"+di+"_annualRevenue"],{font:{sz:10,name:"Arial"},numFmt:"$#,##0",alignment:{horizontal:"right"}});
+      sf(ws4,r,2,"="+aRef["d"+di+"_revenueImpact"],cellP);
+      sc(ws4,r,3,"—",cellNA);sc(ws4,r,4,"—",cellNA);sc(ws4,r,5,"—",cellNA);sc(ws4,r,6,"—",cellNA);sc(ws4,r,7,"—",cellNA);
+      sf(ws4,r,8,"="+aRef["d"+di+"_revenueImpact"]+"*"+aRef["d"+di+"_annualRevenue"],cell$);
+      dollarRows.push(rowRef);
+    } else if(d.type==="deprecate_software"){
+      sf(ws4,r,1,"="+aRef["d"+di+"_year1Cost"],cell$);sf(ws4,r,2,"="+aRef["d"+di+"_year2Cost"],cell$);sf(ws4,r,3,"="+aRef["d"+di+"_year3Cost"],cell$);sf(ws4,r,4,"="+aRef["d"+di+"_year4Cost"],cell$);sf(ws4,r,5,"="+aRef["d"+di+"_year5Cost"],cell$);
+      sc(ws4,r,6,"—",cellNA);sc(ws4,r,7,"—",cellNA);
+      sf(ws4,r,8,"="+aRef["d"+di+"_year1Cost"]+"+"+aRef["d"+di+"_year2Cost"]+"+"+aRef["d"+di+"_year3Cost"]+"+"+aRef["d"+di+"_year4Cost"]+"+"+aRef["d"+di+"_year5Cost"],cell$);
+      dollarRows.push(rowRef);
     }
     r++;
   });
@@ -880,8 +939,6 @@ async function exportWord(model, drivers, g) {
     const leverColors = ["#00E05C","#37CEBA","#FFCF00","#A78BFA","#F97316","#14B8A6","#EC4899","#6366F1"];
     const allLevers = [
       ...el.map((d,i) => ({ name:d.name, val:model.lt[d.id]||0, color:leverColors[i%leverColors.length] })),
-      ...(model.lt._fte>0 ? [{ name:"FTE Avoidance", val:model.lt._fte, color:"#10B981" }] : []),
-      ...(model.lt._l4>0  ? [{ name:"Platform Consolidation", val:model.lt._l4, color:"#059669" }] : []),
     ].filter(l=>l.val>0).sort((a,b)=>b.val-a.val).slice(0,8);
 
     const W=900, H=420, padL=180, padR=40, padT=40, padB=60;
@@ -1092,8 +1149,6 @@ async function exportWord(model, drivers, g) {
     const leverColors = ["#00E05C","#37CEBA","#FFCF00","#A78BFA","#F97316","#14B8A6","#EC4899","#6366F1"];
     const allLevers = [
       ...el.map((d,i)=>({name:d.name, val:model.lt[d.id]||0})),
-      ...(model.lt._fte>0?[{name:"FTE Avoidance",val:model.lt._fte}]:[]),
-      ...(model.lt._l4>0?[{name:"Platform Consolidation",val:model.lt._l4}]:[]),
     ].filter(l=>l.val>0).sort((a,b)=>b.val-a.val);
 
     const leverRows = allLevers.map(l=>[l.name, fmtK(l.val)]);
@@ -1106,7 +1161,6 @@ async function exportWord(model, drivers, g) {
         {label:netShort, value:netValFmt, sub: useNPV?`${H}-yr @ ${pct(g.discountRate||0)}`:`${H}-yr net`},
         {label:"Hours Saved", value:fmtHours(totalHours), sub:"Included in Net Value"},
         {label:"Payback Period", value:pbStr, sub:pbSub},
-        {label:"Cost of Inaction", value:fmtK(model.coiTotal), sub:`${H}-yr status quo cost`},
       ]),
       gap(200,0),
       h2("Value by Driver"),
@@ -1153,15 +1207,7 @@ async function exportWord(model, drivers, g) {
       { before:"Reactive decisions", beforeDesc:"Leadership acts on stale data. Issues surface too late to course-correct.", after:"Proactive management", afterDesc:"Predictive insights surface risks early — before they become delays." },
       { before:"Scale requires headcount", beforeDesc:"Growth means more hires. No efficiency multiplier from existing investment.",
         after:"Scale without adding headcount",
-        afterDesc: model.lt._fte>0 ? `${fmtK(model.lt._fte)} in FTE costs avoided over ${H} years. Automation and templates absorb growth.` : "[X] FTEs in avoided headcount costs. Automation and templates absorb growth." },
-    ];
-
-    // CoI breakdown
-    const coiRows = [
-      ...el.map(d => [d.name, fmtK(model.years.reduce((a,y)=>a+(y.coiByDriver[d.id]||0),0))]),
-      ...(g.legacyFullCost>0?[["Legacy Platform (Status Quo)", fmtK(g.legacyFullCost * H)]]: []),
-      ...(g.fteAvoided>0?[["FTE Headcount Gap (No Automation)", fmtK(g.fteAvoided*g.fteCost*H)]]: []),
-      [{text:`${H}-Year Cost of Inaction`,total:true},{text:fmtK(model.coiTotal),total:true}],
+        afterDesc: "[X] FTEs in avoided headcount costs. Automation and templates absorb growth." },
     ];
 
     return [
@@ -1170,11 +1216,6 @@ async function exportWord(model, drivers, g) {
       placeholder("Operating Context","One sentence: e.g., 'Today, [COMPANY] operates [X] teams across [Y] departments using fragmented tools that limit visibility and scale.'"),
       gap(160,0),
       beforeAfterTable(rows),
-      gap(200,0),
-      h2("Cost of Doing Nothing"),
-      bodyP(`Every year without action carries a measurable cost. The table below estimates what the status quo is costing ${cName} over ${H} years.`),
-      gap(80,0),
-      dataTable(["Cost Category",`${H}-Year Impact`], coiRows, [6480,2880]),
       gap(160,0),
       placeholder("Champion Quote","e.g., \"We spend more time tracking work than doing it.\" — [NAME], [TITLE]"),
       pageBreak(),
@@ -1203,8 +1244,6 @@ async function exportWord(model, drivers, g) {
 
     const benRows = [
       ...el.map(d => [d.name, ...model.years.map(y=>fmt(y.lv[d.id]||0)), fmt(model.lt[d.id]||0)]),
-      ...(model.lt._fte>0?[["FTE Avoidance", ...model.years.map(y=>fmt(y.fteSav)), fmt(model.lt._fte)]]: []),
-      ...(model.lt._l4>0?[["Platform Consolidation", ...model.years.map(y=>fmt(y.legacySav)), fmt(model.lt._l4)]]: []),
     ];
     const totalBenRow = [{text:"Total Benefit",total:true}, ...model.years.map(y=>({text:fmt(y.totalBenefit),total:true})), {text:fmt(model.tb),total:true}];
     const netRow      = [{text:netShort,total:true}, ...model.years.map(y=>({text:fmt(y.totalBenefit-y.totalCost),total:true})), {text:fmtK(netVal),total:true}];
@@ -1258,7 +1297,6 @@ async function exportWord(model, drivers, g) {
         {label:netShort, value:fmtK(netVal), sub:useNPV?`${H}-yr @ ${pct(g.discountRate||0)}`:`${H}-yr net`},
         {label:"Total Benefit", value:fmtK(model.tb), sub:`vs ${fmtK(model.tc)} investment`},
         {label:"Payback Period", value:model.pbm?`${model.pbm} mo`:"N/A", sub:model.pbm?`~${(model.pbm/12).toFixed(1)} years`:""},
-        {label:"Cost of Inaction", value:fmtK(model.coiTotal), sub:`${H}-yr do-nothing cost`},
       ]),
       gap(200,0),
       finTable,
@@ -1284,7 +1322,7 @@ async function exportWord(model, drivers, g) {
     gap(120,0),
     h2("Talent & Organizational Scale"),
     ...(model.totalHours>0 ? [
-      bodyP(`Wrike is projected to reclaim ${fmtHours(model.totalHours)} of team capacity over ${H} years — equivalent to ${fmtK(model.totalHours * (g.fteCost/2080))} in staff time at your fully-loaded cost rate. This capacity is already reflected in the Net Value figure.`),
+      bodyP(`Wrike is projected to reclaim ${fmtHours(model.totalHours)} of team capacity over ${H} years — equivalent to ${fmtK(model.totalHours * ((el.length?el.reduce((s,d)=>s+(d.inputs.fteCost!=null?d.inputs.fteCost:100000),0)/el.length:100000)/2080))} in staff time at average fully-loaded cost. This capacity is already reflected in the Net Value figure.`),
     ] : [
       placeholder("Talent Impact","e.g., '[X] FTEs spend [X]% of time on admin coordination. Reclaiming that = [X] FTEs of capacity without additional headcount.'"),
     ]),
@@ -1304,17 +1342,13 @@ async function exportWord(model, drivers, g) {
       ["Customer", cName],
       ["Analysis Period", `${H} years`],
       ["Discount Rate", useNPV ? pct(g.discountRate||0) : "Not applied"],
-      ["FTE Fully-Loaded Cost", `${fmtK(g.fteCost||0)} / year`],
       ["Adoption Ramp", `${g.adoptionRamp||0} months`],
-      ["Headcount Growth", pct(g.headcountGrowth||0)+" / year"],
-      ["FTE Avoidance", g.fteAvoided>0 ? `${g.fteAvoided} FTEs` : "Not modeled"],
-      ["Legacy Platform Phase-Down", g.legacyFullCost>0 ? `${fmtK(g.legacyFullCost)} base` : "Not modeled"],
     ];
 
     const driverRows = el.map(d => [d.name, d.type, fmtK(model.lt[d.id]||0)]);
 
     const scenRows = [
-      ["Conservative (lower adoption, no FTE avoidance)", "[VALUE]", "[X]%", "[X] mo"],
+      ["Conservative (lower adoption)", "[VALUE]", "[X]%", "[X] mo"],
       ["Base Case (current model inputs)",                fmtK(model.npv), pct(model.roi), model.pbm?`${model.pbm} mo`:"N/A"],
       ["Aggressive (full adoption, all levers)",          "[VALUE]", "[X]%", "[X] mo"],
     ];
@@ -1335,9 +1369,7 @@ async function exportWord(model, drivers, g) {
         ["Net Value","Total benefit minus total investment over the model horizon."],
         ["NPV (Net Present Value)","Future cash flows discounted back to today at the stated discount rate."],
         ["ROI","(Total Benefit − Total Cost) ÷ Total Cost, as a percentage."],
-        ["Cost of Inaction","Estimated ongoing cost of the status quo if no investment is made."],
         ["Adoption Ramp","Months before full productivity benefits are assumed to accrue."],
-        ["FTE Avoidance","Headcount growth absorbed by the platform rather than additional hires."],
       ],[3000,6360]),
     ];
   };
@@ -1557,9 +1589,7 @@ function exportPPTX(model, drivers, g) {
     const paramLines = [
       `Time Horizon: ${H} years`,
       `Discount Rate: ${pct(g.discountRate || 0.08)}`,
-      `FTE Fully-Loaded Cost: ${fmtK(g.fteCost || 0)}/yr`,
       `Adoption Ramp: ${g.adoptionRamp || 0} months`,
-      `Headcount Growth: ${pct(g.headcountGrowth || 0)}/yr`,
     ];
     s.addText(paramLines.map((l, i) => ({ text: l, options: { breakLine: i < paramLines.length - 1 } })),
       { x: 6.7, y: 4.1, w: 3.0, h: 1.05, fontSize: 7.5, color: C.muted, fontFace: "Arial", lineSpacingMultiple: 1.3, margin: 0 });
@@ -1571,14 +1601,13 @@ function exportPPTX(model, drivers, g) {
     addBase(s, C.teal);
     addTitle(s, "Executive Summary", `${cName} · ${H}-Year Business Case`);
 
-    // 4 KPI cards across top
-    const kpis4 = [
+    // 3 KPI cards across top
+    const kpis3 = [
       { label: "NPV", value: fmtK(model.npv), sub: `${H}-yr @ ${pct(g.discountRate || 0.08)}`, color: model.npv >= 0 ? C.green : C.red },
       { label: "TOTAL ROI", value: pct(model.roi), sub: fmtK(model.tb) + " total benefit", color: model.roi >= 0 ? C.teal : C.red },
       { label: "PAYBACK PERIOD", value: model.pbm ? model.pbm + " mo" : "N/A", sub: model.pbm ? `~${(model.pbm/12).toFixed(1)} years` : "", color: C.yellow },
-      { label: "COST OF INACTION", value: fmtK(model.coiTotal), sub: `${H}-yr do-nothing cost`, color: C.red },
     ];
-    kpis4.forEach((k, i) => addKpiCard(s, 0.3 + i * 2.36, 0.88, 2.2, 0.92, k.label, k.value, k.sub, k.color));
+    kpis3.forEach((k, i) => addKpiCard(s, 0.3 + i * 3.07, 0.88, 2.2, 0.92, k.label, k.value, k.sub, k.color));
 
     // Left: current state challenges
     s.addShape(pres.shapes.RECTANGLE, { x: 0.3, y: 1.94, w: 5.35, h: 3.3, fill: { color: C.bgCard }, line: { color: C.border, pt: 1 } });
@@ -1602,8 +1631,6 @@ function exportPPTX(model, drivers, g) {
     const leverColors = ["00E05C", "37CEBA", "FFCF00", "EF4444", "A78BFA", "F97316", "14B8A6", "EC4899"];
     const allLevers = [
       ...el.map(d => ({ name: d.name, val: model.lt[d.id] || 0 })),
-      ...(model.lt._l4 > 0 ? [{ name: "Platform Consolidation", val: model.lt._l4 }] : []),
-      ...(model.lt._fte > 0 ? [{ name: "FTE Avoidance", val: model.lt._fte }] : []),
     ].filter(l => l.val > 0).sort((a, b) => b.val - a.val);
 
     const maxVal = allLevers.length > 0 ? allLevers[0].val : 1;
@@ -1697,7 +1724,7 @@ function exportPPTX(model, drivers, g) {
       { before: "Fragmented tools", beforeDesc: "Manual data assembly across disconnected systems creates reporting delays and blind spots.", after: "Real-time visibility", afterDesc: "Dashboards connected to OKRs give leadership instant status across all teams." },
       { before: "No single source of truth", beforeDesc: "Each team tracks differently — version conflicts and rework are constant.", after: "Unified platform", afterDesc: "One system of record eliminates duplicated effort and version chaos." },
       { before: "Reactive decisions", beforeDesc: "Leadership acts on stale data. Issues surface too late to course-correct.", after: "Proactive management", afterDesc: "Predictive insights surface risks early — before they become delays." },
-      { before: "Scale requires headcount", beforeDesc: "Growth means more hires. No efficiency multiplier from existing investment.", after: "Scale without adding headcount", afterDesc: `Automation and templates absorb growth. ${model.lt._fte > 0 ? fmtK(model.lt._fte) + " in FTE costs avoided." : "[X] FTEs avoided annually."}` },
+      { before: "Scale requires headcount", beforeDesc: "Growth means more hires. No efficiency multiplier from existing investment.", after: "Scale without adding headcount", afterDesc: "Automation and templates absorb growth. [X] FTEs avoided annually." },
     ];
 
     // Column headers
@@ -1740,8 +1767,6 @@ function exportPPTX(model, drivers, g) {
     // Lever cards
     const leverData = [
       ...el.map((d, idx) => ({ name: d.name, val: model.lt[d.id] || 0, color: leverColors[idx % 8] })),
-      ...(model.lt._l4 > 0 ? [{ name: "Platform Consolidation", val: model.lt._l4, color: "10B981" }] : []),
-      ...(model.lt._fte > 0 ? [{ name: "FTE Avoidance", val: model.lt._fte, color: "059669" }] : []),
     ].filter(l => l.val > 0);
 
     const leverColors8 = ["00E05C", "37CEBA", "FFCF00", "A78BFA", "F97316", "14B8A6", "EC4899", "6366F1"];
@@ -1802,14 +1827,13 @@ function exportPPTX(model, drivers, g) {
     addBase(s, C.green);
     addTitle(s, "Financial Summary", `${cName} · ${H}-Year Financial Projection`);
 
-    // 4 KPI cards
-    const kpis4Fin = [
+    // 3 KPI cards
+    const kpis3Fin = [
       { label: "NPV", value: fmtK(model.npv), sub: `${H}-yr @ ${pct(g.discountRate || 0.08)}`, color: model.npv >= 0 ? C.green : C.red },
       { label: "TOTAL ROI", value: pct(model.roi), sub: `${fmtK(model.tb)} benefit vs ${fmtK(model.tc)} cost`, color: model.roi >= 0 ? C.teal : C.red },
       { label: "PAYBACK PERIOD", value: model.pbm ? model.pbm + " mo" : "N/A", sub: model.pbm ? `~${(model.pbm/12).toFixed(1)} years` : "", color: C.yellow },
-      { label: "COST OF INACTION", value: fmtK(model.coiTotal), sub: `${H}-yr status quo cost`, color: C.red },
     ];
-    kpis4Fin.forEach((k, i) => addKpiCard(s, 0.3 + i * 2.36, 0.88, 2.2, 0.88, k.label, k.value, k.sub, k.color));
+    kpis3Fin.forEach((k, i) => addKpiCard(s, 0.3 + i * 3.07, 0.88, 2.2, 0.88, k.label, k.value, k.sub, k.color));
 
     // Year-by-year table
     addSectionLabel(s, 0.3, 1.88, 9.4, "Year-by-Year Projection");
@@ -1866,18 +1890,6 @@ function exportPPTX(model, drivers, g) {
       tableRows.push(tr);
     });
 
-    if (model.lt._l4 > 0) {
-      const tr = [{ text: "Platform Consolidation", options: { color: C.muted, fill: { color: C.bgCard } } }];
-      model.years.forEach(y => tr.push({ text: fmt(y.legacySav), options: { align: "right", color: C.green, fill: { color: C.bgCard } } }));
-      tr.push({ text: fmt(model.lt._l4), options: { align: "right", bold: true, color: C.green, fill: { color: C.bgCard } } });
-      tableRows.push(tr);
-    }
-    if (model.lt._fte > 0) {
-      const tr = [{ text: "FTE Avoidance", options: { color: C.muted, fill: { color: C.bgCard } } }];
-      model.years.forEach(y => tr.push({ text: fmt(y.fteSav), options: { align: "right", color: C.green, fill: { color: C.bgCard } } }));
-      tr.push({ text: fmt(model.lt._fte), options: { align: "right", bold: true, color: C.green, fill: { color: C.bgCard } } });
-      tableRows.push(tr);
-    }
 
     const totalBenRow = [{ text: "Total Benefit", options: { bold: true, color: C.green, fill: { color: "0A2A12" } } }];
     model.years.forEach(y => totalBenRow.push({ text: fmt(y.totalBenefit), options: { align: "right", bold: true, color: C.green, fill: { color: "0A2A12" } } }));
@@ -2036,10 +2048,10 @@ function exportPPTX(model, drivers, g) {
     addTitle(s, "Appendix");
 
     const sections = [
-      { letter: "A", title: "Value Model Assumptions", items: ["All lever inputs and formula types", "Adoption ramp methodology", `FTE fully-loaded cost basis: ${fmt(g.fteCost || 0)}/yr`, `Discount rate: ${pct(g.discountRate || 0.08)} · Horizon: ${H} years`] },
+      { letter: "A", title: "Value Model Assumptions", items: ["All lever inputs and formula types", "Adoption ramp methodology", `Discount rate: ${pct(g.discountRate || 0.08)} · Horizon: ${H} years`] },
       { letter: "B", title: "Sensitivity Scenarios", items: ["Conservative: lower reduction rates, no FTE avoidance", "Base Case: current model inputs", "Aggressive: full adoption, all levers enabled", "No FTE avoidance scenario"] },
       { letter: "C", title: "Reference Customers", items: ["Club Car — Manufacturing / PMO", "Johnson & Johnson — Healthcare / PM", "Academy Sports — Retail / Marketing", "Danone — CPG / Cross-functional"] },
-      { letter: "D", title: "Glossary", items: ["NPV: Net Present Value (future cash flows discounted to today)", "ROI: (Total Benefit − Total Cost) / Total Cost", "CoI: Cost of Inaction — status quo cost over model horizon", "Adoption ramp: months before full productivity benefit accrues"] },
+      { letter: "D", title: "Glossary", items: ["NPV: Net Present Value (future cash flows discounted to today)", "ROI: (Total Benefit − Total Cost) / Total Cost", "Adoption ramp: months before full productivity benefit accrues"] },
     ];
 
     sections.forEach((sec, i) => {
@@ -2064,65 +2076,97 @@ function exportPPTX(model, drivers, g) {
 }
 
 /* ── UI ── */
-function Tip({text}){const[show,setShow]=useState(false);if(!text)return null;return(
-  <span style={{position:"relative",display:"inline-block",marginLeft:5,cursor:"pointer"}} onMouseEnter={()=>setShow(true)} onMouseLeave={()=>setShow(false)} onClick={()=>setShow(!show)}>
+function Tip({text,alignLeft,alignRight}){const[show,setShow]=useState(false);if(!text)return null;const pos=alignRight?{left:0,transform:"none"}:alignLeft?{right:0,transform:"none"}:{left:"50%",transform:"translateX(-50%)"};const arrowPos=alignRight?{left:8,transform:"rotate(45deg)"}:alignLeft?{right:8,transform:"rotate(45deg)"}:{left:"50%",transform:"translateX(-50%) rotate(45deg)"};return(
+  <span style={{position:"relative",display:"inline-flex",flexShrink:0,marginLeft:alignLeft?2:5,marginRight:alignRight?0:undefined,cursor:"pointer"}} onMouseEnter={()=>setShow(true)} onMouseLeave={()=>setShow(false)} onClick={()=>setShow(!show)}>
     <span style={{display:"inline-flex",alignItems:"center",justifyContent:"center",width:15,height:15,borderRadius:"50%",background:"#e2e8f0",color:"#475569",fontSize:9,fontWeight:700}}>?</span>
-    {show&&<div style={{position:"absolute",bottom:22,left:"50%",transform:"translateX(-50%)",width:260,background:"#1e293b",color:"#f1f5f9",padding:"10px 12px",borderRadius:8,fontSize:11,lineHeight:1.5,zIndex:999,boxShadow:"0 8px 24px rgba(0,0,0,0.25)",fontWeight:400,pointerEvents:"none"}}>
-      <div style={{position:"absolute",bottom:-5,left:"50%",transform:"translateX(-50%) rotate(45deg)",width:10,height:10,background:"#1e293b"}}/>{text}
+    {show&&<div style={{position:"absolute",bottom:22,...pos,width:260,maxWidth:"min(260px,calc(100vw - 40px))",background:"#1e293b",color:"#f1f5f9",padding:"10px 12px",borderRadius:8,fontSize:11,lineHeight:1.5,zIndex:9999,boxShadow:"0 8px 24px rgba(0,0,0,0.25)",fontWeight:400,pointerEvents:"none"}}>
+      <div style={{position:"absolute",bottom:-5,width:10,height:10,background:"#1e293b",...arrowPos}}/>{text}
     </div>}
   </span>);
 }
-function Inp({label,value,onChange,prefix,suffix,step=1,min=0,help,placeholder}){return(
-  <div style={{marginBottom:6}}>
+function formatNum(n){if(n===undefined||n===null||n===""||isNaN(n))return"";return Number(n).toLocaleString("en-US",{maximumFractionDigits:20});}
+function parseNum(s){const cleaned=String(s).replace(/,/g,"").trim();if(cleaned===""||cleaned==="-")return 0;const num=Number(cleaned);return isNaN(num)?0:num;}
+function FormattedNumInput({value,onChange,style,step,placeholder,readOnly}){
+  const[focused,setFocused]=useState(false);
+  const[editStr,setEditStr]=useState("");
+  const displayValue=focused?editStr:formatNum(value);
+  return(<input type="text" inputMode="decimal" value={displayValue} placeholder={placeholder} readOnly={readOnly} disabled={readOnly}
+    onChange={e=>{if(!readOnly){setEditStr(e.target.value);onChange(parseNum(e.target.value));}}}
+    onFocus={()=>{if(!readOnly){setFocused(true);setEditStr(value!=null&&value!==""?String(value):"");}}}
+    onBlur={()=>setFocused(false)}
+    style={style}/>);
+}
+function Inp({label,value,onChange,prefix,suffix,step=1,min=0,help,placeholder,helpAlignRight,disabled}){
+  const[focused,setFocused]=useState(false);
+  const[editStr,setEditStr]=useState("");
+  const isNum=!placeholder;
+  const displayValue=isNum?(focused?editStr:formatNum(value)):value;
+  const handleFocus=()=>{if(!disabled&&isNum){setFocused(true);setEditStr(value!=null&&value!==""?String(value):"");}};
+  const handleBlur=(e)=>{e.target.style.borderColor="#cbd5e1";if(isNum){setFocused(false);const parsed=parseNum(editStr);onChange(parsed);}};
+  const handleChange=(e)=>{if(disabled)return;const v=e.target.value;if(isNum){setEditStr(v);onChange(parseNum(v));}else onChange(v);};
+  return(
+  <div style={{marginBottom:6,opacity:disabled?0.85:1}}>
     <div style={{display:"flex",alignItems:"center",marginBottom:2}}>
-      <label style={{fontSize:10,fontWeight:600,color:"#64748b",letterSpacing:"0.02em"}}>{label}</label>{help&&<Tip text={help}/>}
+      <label style={{fontSize:10,fontWeight:600,color:"#64748b",letterSpacing:"0.02em"}}>{label}</label>{help&&<Tip text={help} alignRight={helpAlignRight}/>}
     </div>
     <div style={{display:"flex",alignItems:"center",gap:3}}>
       {prefix&&<span style={{fontSize:12,color:"#475569",fontWeight:600}}>{prefix}</span>}
-      <input type={placeholder?"text":"number"} value={value} onChange={e=>onChange(placeholder?e.target.value:Number(e.target.value))} step={step} min={min} placeholder={placeholder}
-        style={{width:"100%",padding:"5px 8px",border:"1px solid #cbd5e1",borderRadius:5,fontSize:12,fontFamily:placeholder?"'DM Sans',sans-serif":"'JetBrains Mono',monospace",color:"#1e293b",background:"#f8fafc",outline:"none"}}
-        onFocus={e=>e.target.style.borderColor="#3b82f6"} onBlur={e=>e.target.style.borderColor="#cbd5e1"}/>
+      <input type="text" inputMode={isNum?"decimal":"text"} value={displayValue} onChange={handleChange} onFocus={(e)=>{e.target.style.borderColor="#3b82f6";handleFocus();}} onBlur={handleBlur} placeholder={placeholder} readOnly={disabled} disabled={disabled}
+        style={{width:"100%",padding:"5px 8px",border:"1px solid #cbd5e1",borderRadius:5,fontSize:12,fontFamily:"'Montserrat',sans-serif",color:"#1e293b",background:disabled?"#f1f5f9":"#f8fafc",outline:"none",cursor:disabled?"default":"text"}}/>
       {suffix&&<span style={{fontSize:10,color:"#64748b",whiteSpace:"nowrap"}}>{suffix}</span>}
     </div>
   </div>);
 }
-function Sld({label,value,onChange,min,max,step=1,format="num",help}){const d=format==="pct"?pct(value):value;return(
-  <div style={{marginBottom:7}}>
+function Sld({label,value,onChange,min,max,step=1,format="num",help,helpAlignRight,disabled}){const d=format==="pct"?pct(value):value;return(
+  <div style={{marginBottom:7,opacity:disabled?0.85:1}}>
     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:2}}>
-      <div style={{display:"flex",alignItems:"center"}}><label style={{fontSize:10,fontWeight:600,color:"#64748b"}}>{label}</label>{help&&<Tip text={help}/>}</div>
-      <span style={{fontSize:12,fontWeight:700,color:"#1e293b",fontFamily:"'JetBrains Mono',monospace"}}>{d}</span>
+      <div style={{display:"flex",alignItems:"center"}}><label style={{fontSize:10,fontWeight:600,color:"#64748b"}}>{label}</label>{help&&<Tip text={help} alignRight={helpAlignRight}/>}</div>
+      <span style={{fontSize:12,fontWeight:700,color:"#1e293b",fontFamily:"'Montserrat',sans-serif"}}>{d}</span>
     </div>
-    <input type="range" min={min} max={max} step={step} value={value} onChange={e=>onChange(Number(e.target.value))} style={{width:"100%",accentColor:"#3b82f6",height:3}}/>
+    <input type="range" min={min} max={max} step={step} value={value} onChange={e=>!disabled&&onChange(Number(e.target.value))} disabled={disabled} style={{width:"100%",accentColor:"#3b82f6",height:3,cursor:disabled?"default":"pointer"}}/>
   </div>);
 }
-function Stat({label,value,sub,color="#1e293b",bg="#f1f5f9"}){return(
+function Stat({label,value,sub,color="#1e293b",bg="#f1f5f9",labelSize}){const ls=labelSize!=null?labelSize:9;return(
   <div style={{background:bg,borderRadius:8,padding:"10px 12px",flex:1,minWidth:115}}>
-    <div style={{fontSize:9,fontWeight:700,color:"#64748b",textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:3}}>{label}</div>
-    <div style={{fontSize:20,fontWeight:800,color,fontFamily:"'JetBrains Mono',monospace",lineHeight:1.1}}>{value}</div>
+    <div style={{fontSize:ls,fontWeight:700,color:"#64748b",textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:3}}>{label}</div>
+    <div style={{fontSize:20,fontWeight:800,color,fontFamily:"'Montserrat',sans-serif",lineHeight:1.1}}>{value}</div>
     {sub&&<div style={{fontSize:9,color:"#94a3b8",marginTop:2}}>{sub}</div>}
   </div>);
 }
 
-function DriverInputs({driver,onChange}){
-  const ui=(f)=>(v)=>onChange({...driver,inputs:{...driver.inputs,[f]:v}});
+const FteCostInp=({driver,ui,currency,readOnly})=>{
+  const i=driver.inputs,l=driver.labels||{};
+  return <Inp label={l.fteCost||"Fully-Loaded FTE Cost"} value={i.fteCost!=null?i.fteCost:100000} onChange={ui("fteCost")} prefix={currency||"$"} suffix="/yr" help="Salary + benefits + overhead for this driver." disabled={readOnly}/>;
+};
+function DriverInputs({driver,onChange,currency,horizon,readOnly}){
+  const ui=(f)=>(v)=>!readOnly&&onChange({...driver,inputs:{...driver.inputs,[f]:v}});
   const i=driver.inputs,l=driver.labels||{},h=driver.helps||{};
   const ft=FORMULA_TYPES.find(f=>f.v===driver.type);
   const b=INDUSTRY_BENCHMARKS[driver.id];
+  const CUR=currency||"$";
+  const H=Math.min(5,Math.max(1,horizon||3));
+  const ro=!!readOnly;
   const BenchmarkBanner=()=>b?<div style={{background:"#dbeafe",border:"1px solid #7dd3fc",borderRadius:6,padding:"8px 10px",marginBottom:10,fontSize:11,fontWeight:600,color:"#0369a1"}}><span>ℹ️ Industry Benchmark: {b.benchmark}</span> <span style={{fontSize:9,color:"#64748b"}}>({b.source})</span></div>:null;
   switch(driver.type){
-    case "time": return(<><BenchmarkBanner/><Inp label={l.people||"Team Size"} value={i.people} onChange={ui("people")} suffix="people" help={h.people}/><Inp label={l.hoursPerCycle||"Hours / Cycle / Person"} value={i.hoursPerCycle} onChange={ui("hoursPerCycle")} suffix="hrs" step={0.5} help={h.hoursPerCycle}/><div style={{marginBottom:6}}><div style={{display:"flex",alignItems:"center",marginBottom:2}}><label style={{fontSize:10,fontWeight:600,color:"#64748b"}}>Frequency</label></div><select value={[52,26,12,4,1].includes(i.cyclesPerYear)?String(i.cyclesPerYear):"custom"} onChange={e=>{const v=e.target.value;if(v==="custom"){ui("cyclesPerYear")(10);return;}ui("cyclesPerYear")(Number(v));}} style={{width:"100%",padding:"5px 8px",border:"1px solid #cbd5e1",borderRadius:5,fontSize:12,color:"#1e293b",background:"#f8fafc",outline:"none",marginBottom:3}}><option value="52">Weekly (52/yr)</option><option value="26">Bi-weekly (26/yr)</option><option value="12">Monthly (12/yr)</option><option value="4">Quarterly (4/yr)</option><option value="1">Annual (1/yr)</option><option value="custom">Custom</option></select>{![52,26,12,4,1].includes(i.cyclesPerYear)&&<Inp label="Custom Cycles / Year" value={i.cyclesPerYear} onChange={ui("cyclesPerYear")} min={1}/>}</div><Sld label={l.reduction||"% Reduction"} value={i.reduction} onChange={ui("reduction")} min={0.05} max={0.95} step={0.05} format="pct" help={h.reduction}/></>);
-    case "incident": return(<><BenchmarkBanner/><Inp label={l.people||"People Affected"} value={i.people} onChange={ui("people")} suffix="people" help={h.people}/><Inp label={l.hoursPerIncident||"Hours / Person / Incident"} value={i.hoursPerIncident} onChange={ui("hoursPerIncident")} suffix="hrs" step={0.5} help={h.hoursPerIncident}/><Inp label={l.incidentsPerYear||"Incidents / Year"} value={i.incidentsPerYear} onChange={ui("incidentsPerYear")} help={h.incidentsPerYear}/><Sld label={l.recapture||"Recapture Rate"} value={i.recapture} onChange={ui("recapture")} min={0.05} max={1} step={0.05} format="pct" help={h.recapture}/></>);
-    case "risk": return(<><BenchmarkBanner/><Inp label={l.costPerIncident||"Cost Per Incident"} value={i.costPerIncident} onChange={ui("costPerIncident")} prefix="$" help={h.costPerIncident}/><Sld label={l.probCurrent||"Probability Today"} value={i.probCurrent} onChange={ui("probCurrent")} min={0.01} max={0.3} step={0.01} format="pct" help={h.probCurrent}/><Sld label={l.probWrike||"Probability with Wrike"} value={i.probWrike} onChange={ui("probWrike")} min={0} max={0.2} step={0.01} format="pct" help={h.probWrike}/></>);
-    case "revenue": return(<><BenchmarkBanner/><Inp label={l.annualValue||"Annual Revenue / Value at Risk"} value={i.annualValue} onChange={ui("annualValue")} prefix="$" help={h.annualValue}/><Sld label={l.improvement||"% Improvement"} value={i.improvement} onChange={ui("improvement")} min={0.01} max={0.5} step={0.01} format="pct" help={h.improvement}/></>);
+    case "time": return(<><BenchmarkBanner/><Inp label={l.people||"Team Size"} value={i.people} onChange={ui("people")} suffix="people" help={h.people} disabled={ro}/><Inp label={l.hoursPerCycle||"Hours / Cycle / Person"} value={i.hoursPerCycle} onChange={ui("hoursPerCycle")} suffix="hrs" step={0.5} help={h.hoursPerCycle} disabled={ro}/><div style={{marginBottom:6}}><div style={{display:"flex",alignItems:"center",marginBottom:2}}><label style={{fontSize:10,fontWeight:600,color:"#64748b"}}>Frequency</label></div><select value={[52,26,12,4,1].includes(i.cyclesPerYear)?String(i.cyclesPerYear):"custom"} onChange={e=>{if(ro)return;const v=e.target.value;if(v==="custom"){ui("cyclesPerYear")(10);return;}ui("cyclesPerYear")(Number(v));}} disabled={ro} style={{width:"100%",padding:"5px 8px",border:"1px solid #cbd5e1",borderRadius:5,fontSize:12,fontFamily:"'Montserrat',sans-serif",color:"#1e293b",background:ro?"#f1f5f9":"#f8fafc",outline:"none",marginBottom:3}}><option value="52">Weekly (52/yr)</option><option value="26">Bi-weekly (26/yr)</option><option value="12">Monthly (12/yr)</option><option value="4">Quarterly (4/yr)</option><option value="1">Annual (1/yr)</option><option value="custom">Custom</option></select>{![52,26,12,4,1].includes(i.cyclesPerYear)&&<Inp label="Custom Cycles / Year" value={i.cyclesPerYear} onChange={ui("cyclesPerYear")} min={1} disabled={ro}/>}</div><Sld label={l.reduction||"% Reduction"} value={i.reduction} onChange={ui("reduction")} min={0.05} max={0.95} step={0.05} format="pct" help={h.reduction} disabled={ro}/><FteCostInp driver={driver} ui={ui} currency={CUR} readOnly={ro}/></>);
+    case "incident": return(<><BenchmarkBanner/><Inp label={l.people||"People Affected"} value={i.people} onChange={ui("people")} suffix="people" help={h.people} disabled={ro}/><Inp label={l.hoursPerIncident||"Hours / Person / Incident"} value={i.hoursPerIncident} onChange={ui("hoursPerIncident")} suffix="hrs" step={0.5} help={h.hoursPerIncident} disabled={ro}/><Inp label={l.incidentsPerYear||"Incidents / Year"} value={i.incidentsPerYear} onChange={ui("incidentsPerYear")} help={h.incidentsPerYear} disabled={ro}/><Sld label={l.recapture||"Recapture Rate"} value={i.recapture} onChange={ui("recapture")} min={0.05} max={1} step={0.05} format="pct" help={h.recapture} disabled={ro}/><FteCostInp driver={driver} ui={ui} currency={CUR} readOnly={ro}/></>);
+    case "risk": return(<><BenchmarkBanner/><Inp label={l.costPerIncident||"Cost Per Incident"} value={i.costPerIncident} onChange={ui("costPerIncident")} prefix="$" help={h.costPerIncident} disabled={ro}/><Sld label={l.probCurrent||"Probability Today"} value={i.probCurrent} onChange={ui("probCurrent")} min={0.01} max={0.3} step={0.01} format="pct" help={h.probCurrent} disabled={ro}/><Sld label={l.probWrike||"Probability with Wrike"} value={i.probWrike} onChange={ui("probWrike")} min={0} max={0.2} step={0.01} format="pct" help={h.probWrike} disabled={ro}/><FteCostInp driver={driver} ui={ui} currency={CUR} readOnly={ro}/></>);
+    case "revenue": return(<><BenchmarkBanner/><Inp label={l.annualValue||"Annual Revenue / Value at Risk"} value={i.annualValue} onChange={ui("annualValue")} prefix="$" help={h.annualValue} disabled={ro}/><Sld label={l.improvement||"% Improvement"} value={i.improvement} onChange={ui("improvement")} min={0.01} max={1} step={0.01} format="pct" help={h.improvement} disabled={ro}/><FteCostInp driver={driver} ui={ui} currency={CUR} readOnly={ro}/></>);
     case "project_delay": return(<><BenchmarkBanner/>
-      <Inp label={l.projectsPerYear||"Projects / Year"} value={i.projectsPerYear} onChange={ui("projectsPerYear")} suffix="projects" help={h.projectsPerYear}/>
-      <Sld label={l.delayRate||"% Projects Delayed"} value={i.delayRate} onChange={ui("delayRate")} min={0.05} max={1} step={0.05} format="pct" help={h.delayRate}/>
-      <Inp label={l.avgDelayDays||"Avg Days Late per Delayed Project"} value={i.avgDelayDays} onChange={ui("avgDelayDays")} suffix="days" step={1} help={h.avgDelayDays}/>
-      <Inp label={l.dailyCostOfDelay||"Daily Cost of Delay ($)"} value={i.dailyCostOfDelay} onChange={ui("dailyCostOfDelay")} prefix="$" help={h.dailyCostOfDelay}/>
+      <Inp label={l.projectsPerYear||"Projects / Year"} value={i.projectsPerYear} onChange={ui("projectsPerYear")} suffix="projects" help={h.projectsPerYear} disabled={ro}/>
+      <Sld label={l.delayRate||"% Projects Delayed"} value={i.delayRate} onChange={ui("delayRate")} min={0.05} max={1} step={0.05} format="pct" help={h.delayRate} disabled={ro}/>
+      <Inp label={l.avgDelayDays||"Avg Days Late per Delayed Project"} value={i.avgDelayDays} onChange={ui("avgDelayDays")} suffix="days" step={1} help={h.avgDelayDays} disabled={ro}/>
+      <Inp label={l.dailyCostOfDelay||"Daily Cost of Delay ($)"} value={i.dailyCostOfDelay} onChange={ui("dailyCostOfDelay")} prefix="$" help={h.dailyCostOfDelay} disabled={ro}/>
       <div style={{background:"#f0f9ff",border:"1px solid #bae6fd",borderRadius:6,padding:"7px 10px",marginBottom:8,fontSize:10,color:"#0369a1"}}>
         💡 <strong>How to get daily cost:</strong> Ask "If a project launched 2 weeks late, what's the rough business impact?" Then divide by days. Common anchors: extended agency/contractor fees, delayed campaign revenue, missed SLA penalties.
       </div>
-      <Sld label={l.reductionRate||"% Reduction with Wrike"} value={i.reductionRate} onChange={ui("reductionRate")} min={0.05} max={0.95} step={0.05} format="pct" help={h.reductionRate}/></>);
+      <Sld label={l.reductionRate||"% Reduction with Wrike"} value={i.reductionRate} onChange={ui("reductionRate")} min={0.05} max={0.95} step={0.05} format="pct" help={h.reductionRate} disabled={ro}/><FteCostInp driver={driver} ui={ui} currency={CUR} readOnly={ro}/></>);
+    case "customer_churn": return(<><Inp label={l.currentCustomers||"Current Customers (#)"} value={i.currentCustomers} onChange={ui("currentCustomers")} help={h.currentCustomers} disabled={ro}/><Inp label={l.avgRevenuePerCustomer||"Average Annual Revenue per Customer ($)"} value={i.avgRevenuePerCustomer} onChange={ui("avgRevenuePerCustomer")} prefix={CUR} help={h.avgRevenuePerCustomer} disabled={ro}/><Sld label={l.churnImpact||"Customer Churn Impact (%)"} value={i.churnImpact} onChange={ui("churnImpact")} min={0} max={1} step={0.01} format="pct" help={h.churnImpact} disabled={ro}/></>);
+    case "profit_margin": return(<><Inp label={l.annualRevenue||"Annual Revenue ($)"} value={i.annualRevenue} onChange={ui("annualRevenue")} prefix={CUR} help={h.annualRevenue} disabled={ro}/><Sld label={l.profitMarginImpact||"Profit Margin Impact (%)"} value={i.profitMarginImpact} onChange={ui("profitMarginImpact")} min={0} max={1} step={0.01} format="pct" help={h.profitMarginImpact} disabled={ro}/></>);
+    case "revenue_pct": return(<><Inp label={l.annualRevenue||"Annual Revenue ($)"} value={i.annualRevenue} onChange={ui("annualRevenue")} prefix={CUR} help={h.annualRevenue} disabled={ro}/><Sld label={l.revenueImpact||"Revenue Impact (%)"} value={i.revenueImpact} onChange={ui("revenueImpact")} min={0} max={1} step={0.01} format="pct" help={h.revenueImpact} disabled={ro}/></>);
+    case "deprecate_software": return(<>{Array.from({length:H},(_,idx)=>idx+1).map(yr=>(
+      <Inp key={yr} label={l["year"+yr+"Cost"]||`Year ${yr} Cost ($)`} value={i["year"+yr+"Cost"]!=null?i["year"+yr+"Cost"]:0} onChange={ui("year"+yr+"Cost")} prefix={CUR} help={yr===1?"Estimated annual cost avoided in Year 1.":"Estimated cost avoided in this year."} helpAlignRight disabled={ro}/>
+    ))}</>);
     default: return null;
   }
 }
@@ -2166,34 +2210,37 @@ function DriverLibraryModal({onAdd,onClose,existingIds}){
   const toggle=(id)=>setSelected(p=>{const n={...p};if(n[id])delete n[id];else n[id]=true;return n;});
   const selCount=Object.keys(selected).length;
   if(customMode){return(<Modal onClose={onClose}>
+    <div style={{fontFamily:"'Montserrat',sans-serif"}}>
     <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:16}}>
       <button onClick={()=>setCustomMode(false)} style={{border:"none",background:"none",cursor:"pointer",fontSize:16,color:"#64748b"}}>{"\u2190"}</button>
       <div style={{fontSize:16,fontWeight:700}}>Create Custom Driver</div></div>
     <div style={{marginBottom:10}}><label style={{fontSize:11,fontWeight:600,color:"#64748b",display:"block",marginBottom:4}}>Driver Name</label>
-      <input value={customName} onChange={e=>setCustomName(e.target.value)} placeholder="e.g., Contract Review Cycle Time" style={{width:"100%",padding:"8px 10px",border:"1px solid #cbd5e1",borderRadius:6,fontSize:13,outline:"none",boxSizing:"border-box"}}/></div>
+      <input value={customName} onChange={e=>setCustomName(e.target.value)} placeholder="e.g., Contract Review Cycle Time" style={{width:"100%",padding:"8px 10px",border:"1px solid #cbd5e1",borderRadius:6,fontSize:13,fontFamily:"'Montserrat',sans-serif",outline:"none",boxSizing:"border-box"}}/></div>
     <div style={{marginBottom:10}}><label style={{fontSize:11,fontWeight:600,color:"#64748b",display:"block",marginBottom:4}}>Description</label>
-      <textarea value={customTip} onChange={e=>setCustomTip(e.target.value)} rows={2} placeholder="What does this driver measure?" style={{width:"100%",padding:"8px 10px",border:"1px solid #cbd5e1",borderRadius:6,fontSize:12,outline:"none",resize:"vertical",boxSizing:"border-box"}}/></div>
+      <textarea value={customTip} onChange={e=>setCustomTip(e.target.value)} rows={2} placeholder="What does this driver measure?" style={{width:"100%",padding:"8px 10px",border:"1px solid #cbd5e1",borderRadius:6,fontSize:12,fontFamily:"'Montserrat',sans-serif",outline:"none",resize:"vertical",boxSizing:"border-box"}}/></div>
     <div style={{marginBottom:14}}><label style={{fontSize:11,fontWeight:600,color:"#64748b",display:"block",marginBottom:6}}>Formula Type</label>
       {FORMULA_TYPES.filter(ft=>ft.v!=="project_delay").map(ft=>(<button key={ft.v} onClick={()=>setCustomType(ft.v)} style={{display:"block",width:"100%",textAlign:"left",padding:"8px 12px",marginBottom:4,border:customType===ft.v?"2px solid #3b82f6":"1px solid #e2e8f0",borderRadius:6,cursor:"pointer",background:customType===ft.v?"#eff6ff":"white"}}>
         <div style={{fontSize:12,fontWeight:600,color:"#1e293b"}}>{ft.l}</div><div style={{fontSize:10,color:"#64748b",marginTop:2}}>{ft.d}</div>
       </button>))}</div>
     <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
       <button onClick={()=>setCustomMode(false)} style={{padding:"8px 14px",border:"1px solid #cbd5e1",borderRadius:6,background:"white",cursor:"pointer",fontSize:12,fontWeight:600,color:"#475569"}}>Back</button>
-      <button disabled={!customName.trim()} onClick={()=>{if(!customName.trim())return;const ft=FORMULA_TYPES.find(t=>t.v===customType);onAdd([{id:`c_${Date.now()}`,name:customName.trim(),color:COLORS[Math.floor(Math.random()*COLORS.length)],enabled:true,tip:customTip,type:customType,inputs:{...ft.defaults},labels:{...ft.labels},helps:{},kpis:[]}]);}} style={{padding:"8px 14px",border:"none",borderRadius:6,background:customName.trim()?"#3b82f6":"#cbd5e1",color:"white",cursor:customName.trim()?"pointer":"default",fontSize:12,fontWeight:600}}>Create Driver</button>
+      <button disabled={!customName.trim()} onClick={()=>{if(!customName.trim())return;const ft=FORMULA_TYPES.find(t=>t.v===customType);onAdd([{id:`c_${Date.now()}`,name:customName.trim(),color:CAT_COLORS["Productivity Gains"]||"#475569",enabled:true,tip:customTip,type:customType,inputs:{...ft.defaults},labels:{...ft.labels},helps:{},kpis:[],category:"Productivity Gains"}]);}} style={{padding:"8px 14px",border:"none",borderRadius:6,background:customName.trim()?"#3b82f6":"#cbd5e1",color:"white",cursor:customName.trim()?"pointer":"default",fontSize:12,fontWeight:600}}>Create Driver</button>
+    </div>
     </div>
   </Modal>);}
   return(<Modal onClose={onClose} wide>
+    <div style={{fontFamily:"'Montserrat',sans-serif"}}>
     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
       <div><div style={{fontSize:16,fontWeight:700}}>Value Driver Library</div><div style={{fontSize:11,color:"#64748b",marginTop:2}}>Select drivers that match discovery findings</div></div>
       {selCount>0&&<span style={{background:"#3b82f6",color:"white",borderRadius:12,padding:"3px 10px",fontSize:11,fontWeight:700}}>{selCount} selected</span>}
     </div>
     {DRIVER_LIBRARY.map(cat=>(<div key={cat.cat} style={{marginBottom:12}}>
-      <div style={{fontSize:10,fontWeight:700,color:CAT_COLORS[cat.cat]||"#475569",textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:6,borderBottom:`2px solid ${CAT_COLORS[cat.cat]||"#e2e8f0"}`,paddingBottom:3}}>{cat.cat}</div>
+      <div style={{fontSize:10,fontWeight:700,fontFamily:"'Montserrat',sans-serif",color:CAT_COLORS[cat.cat]||"#475569",textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:6,borderBottom:`2px solid ${CAT_COLORS[cat.cat]||"#e2e8f0"}`,paddingBottom:3}}>{cat.cat}</div>
       {cat.items.map(item=>{const exists=existingIds.includes(item.id);const sel=selected[item.id];return(
-        <button key={item.id} onClick={()=>!exists&&toggle(item.id)} disabled={exists} style={{display:"flex",alignItems:"flex-start",gap:8,width:"100%",padding:"7px 10px",marginBottom:3,border:sel?"2px solid #3b82f6":"1px solid #e2e8f0",borderRadius:6,cursor:exists?"default":"pointer",background:sel?"#eff6ff":exists?"#f8fafc":"white",textAlign:"left",opacity:exists?0.5:1}}>
+        <button key={item.id} onClick={()=>!exists&&toggle(item.id)} disabled={exists} style={{display:"flex",alignItems:"flex-start",gap:8,width:"100%",padding:"7px 10px",marginBottom:3,border:sel?"2px solid #3b82f6":"1px solid #e2e8f0",borderRadius:6,cursor:exists?"default":"pointer",background:sel?"#eff6ff":exists?"#f8fafc":"white",textAlign:"left",opacity:exists?0.5:1,fontFamily:"'Montserrat',sans-serif"}}>
           <div style={{width:16,height:16,borderRadius:4,border:sel?"none":"1.5px solid #cbd5e1",background:sel?"#3b82f6":"white",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,marginTop:1}}>
             {sel&&<span style={{color:"white",fontSize:10,fontWeight:700}}>{"\u2713"}</span>}</div>
-          <div style={{flex:1}}>
+          <div style={{flex:1,fontFamily:"'Montserrat',sans-serif"}}>
             <div style={{fontSize:12,fontWeight:600,color:"#1e293b"}}>{item.name}{exists&&<span style={{fontSize:9,color:"#94a3b8"}}> (added)</span>}</div>
             <div style={{fontSize:10,color:"#64748b",marginTop:1}}>{item.tip}</div>
             <div style={{fontSize:9,color:"#94a3b8",marginTop:2}}>Formula: {FORMULA_TYPES.find(f=>f.v===item.type)?.l}</div>
@@ -2204,11 +2251,13 @@ function DriverLibraryModal({onAdd,onClose,existingIds}){
       <button onClick={()=>setCustomMode(true)} style={{padding:"8px 14px",border:"2px dashed #cbd5e1",borderRadius:6,background:"white",cursor:"pointer",fontSize:12,fontWeight:600,color:"#64748b"}}>+ Create Custom</button>
       <div style={{display:"flex",gap:8}}>
         <button onClick={onClose} style={{padding:"8px 14px",border:"1px solid #cbd5e1",borderRadius:6,background:"white",cursor:"pointer",fontSize:12,fontWeight:600,color:"#475569"}}>Cancel</button>
-        <button disabled={selCount===0} onClick={()=>{const items=DRIVER_LIBRARY.flatMap(c=>c.items).filter(i=>selected[i.id]);const used=new Set();
-          const nd=items.map(item=>{let color=COLORS.find(c=>!used.has(c))||COLORS[Math.floor(Math.random()*COLORS.length)];used.add(color);
-            return{id:item.id,name:item.name,color,enabled:true,tip:item.tip,type:item.type,inputs:{...item.inputs},labels:{...item.labels},helps:{},kpis:item.kpis||[]};});onAdd(nd);
+        <button disabled={selCount===0} onClick={()=>{const items=DRIVER_LIBRARY.flatMap(c=>c.items).filter(i=>selected[i.id]);
+          const nd=items.map(item=>{const cat=DRIVER_LIBRARY.find(c=>c.items.some(it=>it.id===item.id))?.cat||"Productivity Gains";
+            const color=CAT_COLORS[cat]||"#475569";
+            return{id:item.id,name:item.name,color,enabled:true,tip:item.tip,type:item.type,inputs:{...item.inputs},labels:{...item.labels},helps:{},kpis:item.kpis||[],category:cat};});onAdd(nd);
         }} style={{padding:"8px 14px",border:"none",borderRadius:6,background:selCount>0?"#3b82f6":"#cbd5e1",color:"white",cursor:selCount>0?"pointer":"default",fontSize:12,fontWeight:600}}>Add {selCount} Driver{selCount!==1?"s":""}</button>
       </div>
+    </div>
     </div>
   </Modal>);
 }
@@ -2218,15 +2267,15 @@ function EditScenarioModal({scenario,onSave,onClose,onDelete,drivers,globals}){
   return(<Modal onClose={onClose}>
     <div style={{fontSize:16,fontWeight:700,marginBottom:16}}>{scenario.name?"Edit":"Add"} Scenario</div>
     <div style={{marginBottom:10}}><label style={{fontSize:11,fontWeight:600,color:"#64748b",display:"block",marginBottom:4}}>Name</label>
-      <input value={s.name} onChange={e=>setS({...s,name:e.target.value})} style={{width:"100%",padding:"8px 10px",border:"1px solid #cbd5e1",borderRadius:6,fontSize:13,outline:"none",boxSizing:"border-box"}}/></div>
+      <input value={s.name} onChange={e=>setS({...s,name:e.target.value})} style={{width:"100%",padding:"8px 10px",border:"1px solid #cbd5e1",borderRadius:6,fontSize:13,fontFamily:"'Montserrat',sans-serif",outline:"none",boxSizing:"border-box"}}/></div>
     <div style={{marginBottom:12}}><label style={{fontSize:11,fontWeight:600,color:"#64748b",display:"block",marginBottom:4}}>Description</label>
-      <input value={s.desc} onChange={e=>setS({...s,desc:e.target.value})} style={{width:"100%",padding:"8px 10px",border:"1px solid #cbd5e1",borderRadius:6,fontSize:12,outline:"none",boxSizing:"border-box"}}/></div>
+      <input value={s.desc} onChange={e=>setS({...s,desc:e.target.value})} style={{width:"100%",padding:"8px 10px",border:"1px solid #cbd5e1",borderRadius:6,fontSize:12,fontFamily:"'Montserrat',sans-serif",outline:"none",boxSizing:"border-box"}}/></div>
     <label style={{fontSize:11,fontWeight:700,color:"#3b82f6",display:"block",marginBottom:6}}>Global Overrides</label>
     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginBottom:12}}>
-      {[{k:"adoptionRamp",l:"Ramp (mo)",s:1},{k:"fteAvoided",l:"FTEs Avoided",s:0.5}].map(f=>(<div key={f.k}><label style={{fontSize:9,fontWeight:600,color:"#64748b"}}>{f.l}</label>
+      {[{k:"adoptionRamp",l:"Ramp (mo)",s:1}].map(f=>(<div key={f.k}><label style={{fontSize:9,fontWeight:600,color:"#64748b"}}>{f.l}</label>
         <input type="number" step={f.s} value={s.overrides.globalOverrides[f.k]!=null?s.overrides.globalOverrides[f.k]:""} placeholder={String(globals[f.k])}
           onChange={e=>{const v=e.target.value;const go={...s.overrides.globalOverrides};if(v==="")delete go[f.k];else go[f.k]=Number(v);setS({...s,overrides:{...s.overrides,globalOverrides:go}});}}
-          style={{width:"100%",padding:"4px 6px",border:"1px solid #cbd5e1",borderRadius:4,fontSize:11,fontFamily:"'JetBrains Mono',monospace",outline:"none",boxSizing:"border-box"}}/></div>))}
+          style={{width:"100%",padding:"4px 6px",border:"1px solid #cbd5e1",borderRadius:4,fontSize:11,fontFamily:"'Montserrat',sans-serif",outline:"none",boxSizing:"border-box"}}/></div>))}
     </div>
     <label style={{fontSize:11,fontWeight:700,color:"#059669",display:"block",marginBottom:6}}>Driver Overrides</label>
     {drivers.filter(d=>d.enabled).map(drv=>(<div key={drv.id} style={{marginBottom:8,padding:"6px 8px",background:"#f8fafc",borderRadius:6,border:"1px solid #e2e8f0"}}>
@@ -2242,7 +2291,7 @@ function EditScenarioModal({scenario,onSave,onClose,onDelete,drivers,globals}){
             value={s.overrides.leverInputOverrides[drv.id]?.[k]!=null?s.overrides.leverInputOverrides[drv.id][k]:""}
             placeholder={String(drv.inputs[k])}
             onChange={e=>{const v=e.target.value;const lio={...s.overrides.leverInputOverrides};if(v===""){if(lio[drv.id]){delete lio[drv.id][k];if(Object.keys(lio[drv.id]).length===0)delete lio[drv.id];}}else{lio[drv.id]={...lio[drv.id],[k]:Number(v)};}setS({...s,overrides:{...s.overrides,leverInputOverrides:lio}});}}
-            style={{width:"100%",padding:"3px 5px",border:"1px solid #cbd5e1",borderRadius:4,fontSize:10,fontFamily:"'JetBrains Mono',monospace",outline:"none",boxSizing:"border-box"}}/></div>))}
+            style={{width:"100%",padding:"3px 5px",border:"1px solid #cbd5e1",borderRadius:4,fontSize:10,fontFamily:"'Montserrat',sans-serif",outline:"none",boxSizing:"border-box"}}/></div>))}
       </div>
     </div>))}
     <div style={{display:"flex",gap:8,justifyContent:"space-between",marginTop:12}}>
@@ -2258,7 +2307,10 @@ function EditScenarioModal({scenario,onSave,onClose,onDelete,drivers,globals}){
 /* ══════ MAIN ══════ */
 function App(){
   const urlConfig = useMemo(() => getURLConfig(), []);
-  const[drivers,setDrivers]=useState(urlConfig?.d || []);
+  const publicForkKey = useMemo(() => getPublicForkKey(), []);
+  const initialDrivers = (urlConfig?.d || []).map(dr => ({ ...dr, category: dr.category || getCategoryFromLibrary(dr.id) }));
+  const[drivers,setDrivers]=useState(initialDrivers);
+  const[displayOrder,setDisplayOrder]=useState(() => (urlConfig?.o && urlConfig.o.length) ? urlConfig.o : buildDisplayOrderFromDrivers(urlConfig?.d || []));
   const[g,setG]=useState(urlConfig?.g ? {...DEFAULT_GLOBALS, ...urlConfig.g} : DEFAULT_GLOBALS);
   const[scenarios,setScenarios]=useState(DEFAULT_SCENARIOS);
   const[tab,setTab]=useState("drivers");
@@ -2268,7 +2320,18 @@ function App(){
   const[addingScenario,setAddingScenario]=useState(false);
   const[kpis,setKpis]=useState(urlConfig?.k || []);
   const[removedKpis,setRemovedKpis]=useState(urlConfig?.r || {});
-  const[panelOpen,setPanelOpen]=useState(!urlConfig);
+  const[panelOpen,setPanelOpen]=useState(true);
+  const[viewMode,setViewMode]=useState("original");
+  const[savedPublicFork,setSavedPublicFork]=useState(()=>publicForkKey?getPublicFork(publicForkKey):null);
+  const[leftPanelWidth,setLeftPanelWidth]=useState(360);
+  const[resizing,setResizing]=useState(false);
+  useEffect(()=>{
+    if(!resizing)return;
+    const onMove=e=>{const x=e.clientX!=null?e.clientX:e.touches?e.touches[0].clientX:0;setLeftPanelWidth(Math.min(600,Math.max(260,x)));};
+    const onEnd=()=>setResizing(false);
+    window.addEventListener("mousemove",onMove);window.addEventListener("mouseup",onEnd);window.addEventListener("touchmove",onMove,{passive:true});window.addEventListener("touchend",onEnd);
+    return()=>{window.removeEventListener("mousemove",onMove);window.removeEventListener("mouseup",onEnd);window.removeEventListener("touchmove",onMove);window.removeEventListener("touchend",onEnd);};
+  },[resizing]);
   const[openSections,setOpenSections]=useState(()=>{
     const m={}; if(urlConfig?.d) urlConfig.d.forEach((d,i)=>m[d.id]=i===0); return m;
   });
@@ -2283,12 +2346,11 @@ function App(){
   const editMode=true;
   const ug=(k)=>(v)=>setG(p=>({...p,[k]:v}));
   const ts=(id)=>setOpenSections(p=>({...p,[id]:!p[id]}));
-  const setPhaseDown=(yr,val)=>setG(p=>{const a=[...p.legacyPhaseDown];a[yr]=val;return{...p,legacyPhaseDown:a};});
   const setWrikeCost=(yr,val)=>setG(p=>{const a=[...p.wrikeCostByYear];a[yr]=val;return{...p,wrikeCostByYear:a};});
 
   const saveModel=()=>{
     const name=g.customerName||"Untitled Model";
-    const model_data={name,date:new Date().toISOString().split("T")[0],d:drivers,g,k:kpis,r:removedKpis};
+    const model_data={name,date:new Date().toISOString().split("T")[0],d:drivers,g,k:kpis,r:removedKpis,o:displayOrder};
     const existing=savedModels.findIndex(m=>m.name===name);
     let updated;
     if(existing>=0){updated=[...savedModels];updated[existing]=model_data;}
@@ -2297,9 +2359,22 @@ function App(){
     try{localStorage.setItem("wrike_models",JSON.stringify(updated));}catch(e){}
   };
   const loadModel=(m)=>{
-    setDrivers(m.d||[]);setG({...DEFAULT_GLOBALS,...(m.g||{})});setKpis(m.k||[]);setRemovedKpis(m.r||{});
-    const ns={};(m.d||[]).forEach((d,i)=>ns[d.id]=i===0);setOpenSections(ns);
+    const dList=(m.d||[]).map(dr=>({...dr,category:dr.category||getCategoryFromLibrary(dr.id)}));
+    setDrivers(dList);
+    const rawOrder=m.o&&m.o.length?m.o:buildDisplayOrderFromDrivers(dList);setDisplayOrder(rawOrder.map(it=>{if(it.type!=="section")return it;if(it.category==="Integration & Tool Sprawl")return{...it,category:"Software Consolidation"};if(it.category==="Productivity")return{...it,category:"Productivity Gains"};return it}));
+    setG({...DEFAULT_GLOBALS,...(m.g||{})});setKpis(m.k||[]);setRemovedKpis(m.r||{});
+    const ns={};(dList).forEach((d,i)=>ns[d.id]=i===0);setOpenSections(ns);
     setShowModels(false);
+  };
+  const switchToOriginal=()=>{ if(!urlConfig)return; loadModel({d:urlConfig.d,g:urlConfig.g,k:urlConfig.k,r:urlConfig.r,o:urlConfig.o}); setViewMode("original"); setPanelOpen(true); setToast("Viewing original shared model."); };
+  const switchToMyScenario=()=>{ if(!publicForkKey||!savedPublicFork)return; loadModel(savedPublicFork); setViewMode("my-scenario"); setPanelOpen(true); setToast("Editing your scenario."); };
+  const createMyScenario=()=>{ if(!urlConfig||!publicForkKey)return; const snap={d:drivers,g,k:kpis,r:removedKpis,o:displayOrder}; setPublicFork(publicForkKey,snap); setSavedPublicFork(snap); setViewMode("my-scenario"); setPanelOpen(true); setToast("Editing your scenario — save to store locally for this link."); };
+  const saveMyScenario=()=>{ if(!publicForkKey)return; const snap={d:drivers,g,k:kpis,r:removedKpis,o:displayOrder}; setPublicFork(publicForkKey,snap); setSavedPublicFork(snap); setToast("Saved. Your scenario is stored locally for this link."); };
+  const startNewModel=()=>{
+    if(drivers.length>0||(g.customerName&&g.customerName.trim())){if(!window.confirm("Start a new model? The current model will be cleared from this tab. Save it in My Models first if you need to keep it."))return;}
+    setDrivers([]);setDisplayOrder([]);setG({...DEFAULT_GLOBALS});setKpis([]);setRemovedKpis({});setOpenSections({});
+    const base=window.location.origin+window.location.pathname;window.history.replaceState({},"",base);
+    setToast("New model started — share link will be unique for this customer.");
   };
   const deleteModel=(idx)=>{
     const updated=savedModels.filter((_,i)=>i!==idx);
@@ -2307,7 +2382,7 @@ function App(){
     try{localStorage.setItem("wrike_models",JSON.stringify(updated));}catch(e){}
   };
   const exportJSON=()=>{
-    const data={name:g.customerName||"Model",date:new Date().toISOString().split("T")[0],d:drivers,g,k:kpis,r:removedKpis};
+    const data={name:g.customerName||"Model",date:new Date().toISOString().split("T")[0],d:drivers,g,k:kpis,r:removedKpis,o:displayOrder};
     const blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
     const url=URL.createObjectURL(blob);const a=document.createElement("a");
     a.href=url;a.download=`Wrike_Model_${g.customerName||"export"}.json`;a.click();URL.revokeObjectURL(url);
@@ -2326,31 +2401,24 @@ function App(){
   },[drivers,kpis,removedKpis]);
 
   const model = useMemo(()=>{
-    const hr=g.fteCost/2080;const dr=g.discountEnabled?g.discountRate:0;
+    const dr=g.discountEnabled?g.discountRate:0;
     const years=[];const el=drivers.filter(d=>d.enabled);
     for(let y=1;y<=g.horizon;y++){
       const af=y===1?Math.max(0,(12-g.adoptionRamp)/12):1;
-      const lv={};const lh={};let tlb=0;el.forEach(d=>{const v=calcDriver(d,hr,af);lv[d.id]=v;tlb+=v;lh[d.id]=calcDriverHours(d,af);});
-      const ssSav=g.legacyFullCost-(g.legacyPhaseDown[y-1]||0);
-      const fteSav=y===1?(g.fteAvoidY1?g.fteAvoided*g.fteCost*af:0):g.fteAvoided*g.fteCost;
-      const legacySav=Math.max(0,ssSav);
-      const l4=legacySav+fteSav;
+      const lv={};const lh={};let tlb=0;el.forEach(d=>{const v=calcDriver(d,af,y);lv[d.id]=v;tlb+=v;lh[d.id]=calcDriverHours(d,af);});
+      const l4=0;
       const wLicCost=g.wrikeCostByYear[y-1]||0;
       const wProf=y===1?g.wrikeProfServices:0;const wMig=y===1?g.wrikeMigration:0;
       const wSKUs=g.wrikeAdditionalSKUs.reduce((a,s)=>a+(s.oneTime?(y===1?s.annual||0:0):s.annual||0),0);
       const skuByLine=g.wrikeAdditionalSKUs.map(s=>({name:s.name,cost:s.oneTime?(y===1?s.annual||0:0):s.annual||0}));
       const totalCost=wLicCost+wProf+wMig+wSKUs;const totalBenefit=tlb+l4;const net=totalBenefit-totalCost;
       const df=1/Math.pow(1+dr,y);
-      let coiL=0;const coiByDriver={};el.forEach(d=>{const cv=calcCoi(d,hr);coiByDriver[d.id]=cv;coiL+=cv;});
-      const coiLegacy=g.legacyFullCost||0;
-      const coiTotal=coiLegacy+coiL+(y>1||g.fteAvoidY1?g.fteAvoided*g.fteCost:0);
-      years.push({year:y,af,lv,lh,l4,legacySav,totalCost,totalBenefit,net,df,pvNet:net*df,wLicCost,wProf,wMig,wSKUs,skuByLine,ssSav,fteSav,coiTotal,coiSS:coiLegacy,coiL,coiByDriver,coiFTE:y>1||g.fteAvoidY1?g.fteAvoided*g.fteCost:0});
+      years.push({year:y,af,lv,lh,l4,totalCost,totalBenefit,net,df,pvNet:net*df,wLicCost,wProf,wMig,wSKUs,skuByLine});
     }
     const npv=years.reduce((a,y)=>a+y.pvNet,0);const tc=years.reduce((a,y)=>a+y.totalCost,0);const tb=years.reduce((a,y)=>a+y.totalBenefit,0);
     const roi=tc>0?(tb-tc)/tc:0;
-    let cum=0,pbm=null;for(const y of years){const mn=y.net/12;for(let m=1;m<=12;m++){cum+=mn;if(cum>=0&&!pbm)pbm=(y.year-1)*12+m;}}
-    const lt={};el.forEach(d=>{lt[d.id]=years.reduce((a,y)=>a+(y.lv[d.id]||0),0);});lt._l4=years.reduce((a,y)=>a+y.legacySav,0);
-    lt._fte=years.reduce((a,y)=>a+y.fteSav,0);
+    const annualNet=tb-tc;const monthlyNet=annualNet/(g.horizon*12);const pbm=(tc>0&&monthlyNet>0)?Math.round(tc/monthlyNet):null;
+    const lt={};el.forEach(d=>{lt[d.id]=years.reduce((a,y)=>a+(y.lv[d.id]||0),0);});
     const lth={};el.forEach(d=>{lth[d.id]=years.reduce((a,y)=>a+(y.lh[d.id]||0),0);});
     const totalHours=el.reduce((a,d)=>a+(lth[d.id]||0),0);
     const totalProjectDays=el.filter(d=>d.type==="project_delay").reduce((a,d)=>{
@@ -2358,8 +2426,7 @@ function App(){
       for(let y=1;y<=g.horizon;y++){const af=y===1?Math.max(0,(12-g.adoptionRamp)/12):1;days+=i.projectsPerYear*i.delayRate*i.avgDelayDays*i.reductionRate*af;}
       return a+days;
     },0);
-    const coiTotal=years.reduce((a,y)=>a+y.coiTotal,0);
-    return{years,npv,tc,tb,roi,pbm,lt,lth,totalHours,totalProjectDays,coiTotal};
+    return{years,npv,tc,tb,roi,pbm,lt,lth,totalHours,totalProjectDays};
   },[drivers,g]);
 
   const scenarioResults=useMemo(()=>{
@@ -2368,10 +2435,9 @@ function App(){
       const sD=drivers.map(d=>{const lo=sc.overrides.leverOverrides[d.id]||{};const lio=sc.overrides.leverInputOverrides[d.id]||{};return{...d,...lo,inputs:{...d.inputs,...lio}};}).filter(d=>d.enabled);
       let tC=0,tB=0,npvS=0;
       for(let y=1;y<=sg.horizon;y++){
-        const af=y===1?Math.max(0,(12-sg.adoptionRamp)/12):1;const shr=sg.fteCost/2080;
-        let lb=0;sD.forEach(d=>lb+=calcDriver(d,shr,af));
-        const ssS=sg.legacyFullCost-(sg.legacyPhaseDown?sg.legacyPhaseDown[y-1]||0:0);const fS=y===1?(sg.fteAvoidY1?sg.fteAvoided*sg.fteCost*af:0):sg.fteAvoided*sg.fteCost;
-        const b=lb+ssS+fS;const wC=sg.wrikeCostByYear[y-1]||0;
+        const af=y===1?Math.max(0,(12-sg.adoptionRamp)/12):1;
+        let lb=0;sD.forEach(d=>lb+=calcDriver(d,af,y));
+        const b=lb;const wC=sg.wrikeCostByYear[y-1]||0;
         const skus=sg.wrikeAdditionalSKUs?sg.wrikeAdditionalSKUs.reduce((a,s)=>a+(s.annual||0),0):0;
         const c=wC+(y===1?sg.wrikeProfServices+sg.wrikeMigration:0)+skus;tC+=c;tB+=b;npvS+=(b-c)/Math.pow(1+dr,y);
       }
@@ -2380,46 +2446,48 @@ function App(){
   },[drivers,g,scenarios]);
 
   const el=drivers.filter(d=>d.enabled);
-  const maxLev=el.length>0?Math.max(...el.map(d=>model.lt[d.id]||0),model.lt._l4||0,model.lt._fte||0):Math.max(model.lt._l4||1,model.lt._fte||0);
-  const TC={drivers:"#8b5cf6",inaction:"#dc2626",yearly:"#3b82f6",sensitivity:"#f59e0b"};
-  const tabs=[{id:"drivers",label:"Value Drivers"},{id:"inaction",label:"Cost of Inaction"},{id:"yearly",label:"Year-by-Year"}];
+  const maxLev=el.length>0?Math.max(...el.map(d=>model.lt[d.id]||0)):1;
+  const TC={drivers:"#8b5cf6",yearly:"#3b82f6",sensitivity:"#f59e0b"};
+  const tabs=[{id:"drivers",label:"Value Drivers"},{id:"yearly",label:"Year-by-Year"}];
+  const readOnlyOriginal=!!(urlConfig&&viewMode==="original");
 
   return(
-    <div style={{fontFamily:"'DM Sans',sans-serif",background:"#fff",minHeight:"100vh",color:"#1e293b"}}>
-      <div style={{background:"linear-gradient(135deg,#0f172a 0%,#1e3a5f 50%,#0f4c75 100%)",padding:"18px 24px 12px",color:"white",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+    <div style={{fontFamily:"'Montserrat',sans-serif",background:"#fff",minHeight:"100vh",color:"#1e293b"}}>
+      <div style={{background:"linear-gradient(135deg,#08CF65 0%,#06b354 100%)",padding:"18px 24px 12px",color:"white",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
         <div style={{display:"flex",alignItems:"center",gap:10}}>
-          <div style={{width:30,height:30,borderRadius:6,background:"linear-gradient(135deg,#3b82f6,#06b6d4)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,fontWeight:800}}>W</div>
+          <div style={{width:30,height:30,borderRadius:6,background:"rgba(255,255,255,0.95)",color:"#06b354",display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,fontWeight:800}}>W</div>
           <div><div style={{fontSize:16,fontWeight:800,letterSpacing:"-0.02em"}}>Wrike Value Model{g.customerName?` — ${g.customerName}`:""}</div>
-            <div style={{fontSize:10,color:"#94a3b8"}}>{g.horizon}-Year Projection</div></div>
+            <div style={{fontSize:10,color:"white"}}>{g.horizon}-Year Projection</div></div>
         </div>
-        <div style={{display:"flex",gap:6}}>
-          <button onClick={()=>setShowModels(true)} style={{padding:"6px 14px",borderRadius:6,border:"1px solid rgba(255,255,255,0.3)",background:"rgba(255,255,255,0.1)",color:"white",cursor:"pointer",fontSize:11,fontWeight:600}}>My Models</button>
-          <button onClick={()=>{saveModel();const url=generateShareURL(drivers,g,kpis,removedKpis);if(url){navigator.clipboard.writeText(url).catch(()=>{});setToast("Saved & link copied!");}else{setToast("Saved!");}}} style={{padding:"6px 14px",borderRadius:6,border:"1px solid rgba(255,255,255,0.3)",background:"rgba(59,130,246,0.4)",color:"white",cursor:"pointer",fontSize:11,fontWeight:600}}>Save & Share</button>
+        <div style={{display:"flex",gap:6,alignItems:"center"}}>
+          {!urlConfig&&<><button onClick={startNewModel} style={{padding:"6px 14px",borderRadius:6,border:"1px solid rgba(255,255,255,0.3)",background:"rgba(255,255,255,0.15)",color:"white",cursor:"pointer",fontSize:11,fontWeight:600}} title="Clear and start a fresh model for a new customer">New model</button>
+          <button onClick={()=>setShowModels(true)} style={{padding:"6px 14px",borderRadius:6,border:"1px solid rgba(255,255,255,0.3)",background:"rgba(255,255,255,0.1)",color:"white",cursor:"pointer",fontSize:11,fontWeight:600}}>My Models</button></>}
+          {!urlConfig&&<button onClick={()=>{saveModel();const url=generateShareURL(drivers,g,kpis,removedKpis,displayOrder);if(url){navigator.clipboard.writeText(url).catch(()=>{});setToast("Saved & link copied!");}else{setToast("Saved!");}}} style={{padding:"6px 14px",borderRadius:6,border:"1px solid rgba(255,255,255,0.3)",background:"rgba(59,130,246,0.4)",color:"white",cursor:"pointer",fontSize:11,fontWeight:600}}>Save & Share</button>}
           <div style={{position:"relative"}} onMouseLeave={()=>{const m=document.getElementById("_exportMenu");if(m)m.style.display="none";}}>
             <button onMouseEnter={()=>{const m=document.getElementById("_exportMenu");if(m)m.style.display="block";}} onClick={()=>{const m=document.getElementById("_exportMenu");if(m)m.style.display=m.style.display==="block"?"none":"block";}} style={{padding:"6px 14px",borderRadius:6,border:"1px solid rgba(255,255,255,0.3)",background:"rgba(255,255,255,0.1)",color:"white",cursor:"pointer",fontSize:11,fontWeight:600,display:"flex",alignItems:"center",gap:5}}>Export <span style={{fontSize:8,opacity:0.7}}>▾</span></button>
             <div id="_exportMenu" style={{display:"none",position:"absolute",top:"calc(100% + 4px)",right:0,background:"#1e293b",border:"1px solid #334155",borderRadius:8,minWidth:160,boxShadow:"0 8px 24px rgba(0,0,0,0.4)",zIndex:999,overflow:"hidden"}}>
               <button onClick={()=>{exportCSV(model,drivers,g,scenarios,scenarioResults,kpis);const m=document.getElementById("_exportMenu");if(m)m.style.display="none";}} style={{width:"100%",padding:"9px 14px",border:"none",background:"none",color:"#f1f5f9",cursor:"pointer",fontSize:11,fontWeight:600,textAlign:"left",display:"flex",alignItems:"center",gap:8}} onMouseEnter={e=>e.currentTarget.style.background="#334155"} onMouseLeave={e=>e.currentTarget.style.background="none"}><span style={{fontSize:13}}>📊</span> Excel</button>
-              <button onClick={()=>{exportPPTX(model,drivers,g);const m=document.getElementById("_exportMenu");if(m)m.style.display="none";}} style={{width:"100%",padding:"9px 14px",border:"none",background:"none",color:"#00e05c",cursor:"pointer",fontSize:11,fontWeight:600,textAlign:"left",display:"flex",alignItems:"center",gap:8}} onMouseEnter={e=>e.currentTarget.style.background="#334155"} onMouseLeave={e=>e.currentTarget.style.background="none"}><span style={{fontSize:13}}>📑</span> PowerPoint</button>
+              {!urlConfig&&<><button onClick={()=>{exportPPTX(model,drivers,g);const m=document.getElementById("_exportMenu");if(m)m.style.display="none";}} style={{width:"100%",padding:"9px 14px",border:"none",background:"none",color:"#00e05c",cursor:"pointer",fontSize:11,fontWeight:600,textAlign:"left",display:"flex",alignItems:"center",gap:8}} onMouseEnter={e=>e.currentTarget.style.background="#334155"} onMouseLeave={e=>e.currentTarget.style.background="none"}><span style={{fontSize:13}}>📑</span> PowerPoint</button>
               <div style={{borderTop:"1px solid #334155",margin:"2px 0"}}/>
-              <button disabled title="Coming soon" style={{width:"100%",padding:"9px 14px",border:"none",background:"none",color:"#00e05c",cursor:"pointer",fontSize:11,fontWeight:600,textAlign:"left",display:"flex",alignItems:"center",gap:8}} onClick={()=>{exportWord(model,drivers,g);const m=document.getElementById("_exportMenu");if(m)m.style.display="none";}} onMouseEnter={e=>e.currentTarget.style.background="#334155"} onMouseLeave={e=>e.currentTarget.style.background="none"}><span style={{fontSize:13}}>📝</span> Word</button>
+              <button disabled title="Coming soon" style={{width:"100%",padding:"9px 14px",border:"none",background:"none",color:"#00e05c",cursor:"pointer",fontSize:11,fontWeight:600,textAlign:"left",display:"flex",alignItems:"center",gap:8}} onClick={()=>{exportWord(model,drivers,g);const m=document.getElementById("_exportMenu");if(m)m.style.display="none";}} onMouseEnter={e=>e.currentTarget.style.background="#334155"} onMouseLeave={e=>e.currentTarget.style.background="none"}><span style={{fontSize:13}}>📝</span> Word</button></>}
             </div>
           </div>
         </div>
       </div>
       <div style={{display:"flex",gap:0,minHeight:"calc(100vh - 60px)"}}>
         {/* LEFT */}
-        {panelOpen&&<div style={{width:280,minWidth:280,background:"#f8fafc",borderRight:"1px solid #e2e8f0",padding:"12px",overflowY:"auto",maxHeight:"calc(100vh - 60px)"}}>
-          <Inp label="Customer Name" value={g.customerName} onChange={ug("customerName")} placeholder="Enter customer name…"/>
-          <Sld label="Time Horizon" value={g.horizon} onChange={ug("horizon")} min={1} max={5} help="Model 1 to 5 years."/>
+        {panelOpen&&<><div style={{width:leftPanelWidth,minWidth:leftPanelWidth,maxWidth:600,background:"#f8fafc",borderRight:"1px solid #e2e8f0",padding:"12px",overflowY:"auto",maxHeight:"calc(100vh - 60px)"}}>
+          <Inp label="Customer Name" value={g.customerName} onChange={ug("customerName")} placeholder="Enter customer name…" disabled={readOnlyOriginal}/>
+          <Sld label="Time Horizon" value={g.horizon} onChange={ug("horizon")} min={1} max={5} help="Model 1 to 5 years." helpAlignRight disabled={readOnlyOriginal}/>
           {/* SHARED */}
           <div style={{marginBottom:8}}>
             <button onClick={()=>ts("_shared")} style={{width:"100%",display:"flex",alignItems:"center",padding:"5px 0",border:"none",background:"none",cursor:"pointer",borderBottom:"2px solid #475569",marginBottom:openSections._shared?6:0,textAlign:"left"}}>
               <span style={{fontSize:10.5,fontWeight:700,color:"#475569",textTransform:"uppercase",letterSpacing:"0.04em",flex:1}}>Shared Assumptions</span>
-              <span style={{fontSize:9,color:"#94a3b8",transform:openSections._shared?"rotate(180deg)":"rotate(0)",transition:"transform 0.2s",marginLeft:4}}>{"\u25BC"}</span></button>
+              <span style={{fontSize:9,color:"#94a3b8",transition:"transform 0.2s",marginLeft:4}}>{openSections._shared?"\u25BC":"\u25C0"}</span></button>
             {openSections._shared&&(<>
               <div style={{marginBottom:6}}>
                 <label style={{fontSize:10,fontWeight:600,color:"#64748b"}}>Currency</label>
-                <select value={g.currency} onChange={e=>setG(p=>({...p,currency:e.target.value}))} style={{width:"100%",padding:"5px 8px",border:"1px solid #cbd5e1",borderRadius:5,fontSize:12,color:"#1e293b",background:"#f8fafc",outline:"none",marginTop:2}}>
+                <select value={g.currency} onChange={e=>!readOnlyOriginal&&setG(p=>({...p,currency:e.target.value}))} disabled={readOnlyOriginal} style={{width:"100%",padding:"5px 8px",border:"1px solid #cbd5e1",borderRadius:5,fontSize:12,fontFamily:"'Montserrat',sans-serif",color:"#1e293b",background:readOnlyOriginal?"#f1f5f9":"#f8fafc",outline:"none",marginTop:2}}>
                   <option value="$">$ USD - US Dollar</option>
                   <option value="€">€ EUR - Euro</option>
                   <option value="£">£ GBP - British Pound</option>
@@ -2434,93 +2502,87 @@ function App(){
                   <option value="S$">S$ SGD - Singapore Dollar</option>
                 </select>
               </div>
-              <Inp label="Fully-Loaded FTE Cost" value={g.fteCost} onChange={ug("fteCost")} prefix={g.currency} suffix="/yr" help="Salary + benefits + overhead."/>
-              <Sld label="Headcount Growth" value={g.headcountGrowth} onChange={ug("headcountGrowth")} min={0} max={0.2} step={0.005} format="pct" help="Cost of Inaction only — shows how problems scale."/>
-              <Sld label="Adoption Ramp" value={g.adoptionRamp} onChange={ug("adoptionRamp")} min={1} max={12} help="Months to full adoption. Y1 benefits prorated. 6-9mo typical."/>
+              <Sld label="Adoption Ramp" value={g.adoptionRamp} onChange={ug("adoptionRamp")} min={1} max={12} help="Months to full adoption. Y1 benefits prorated. 6-9mo typical." helpAlignRight disabled={readOnlyOriginal}/>
               <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:6,marginTop:4}}>
-                <button onClick={()=>setG(p=>({...p,discountEnabled:!p.discountEnabled}))} style={{width:34,height:18,borderRadius:9,border:"none",cursor:"pointer",position:"relative",background:g.discountEnabled?"#3b82f6":"#cbd5e1",transition:"background 0.2s",flexShrink:0}}>
+                <button onClick={()=>!readOnlyOriginal&&setG(p=>({...p,discountEnabled:!p.discountEnabled}))} disabled={readOnlyOriginal} style={{width:34,height:18,borderRadius:9,border:"none",cursor:readOnlyOriginal?"default":"pointer",position:"relative",background:g.discountEnabled?"#3b82f6":"#cbd5e1",transition:"background 0.2s",flexShrink:0,opacity:readOnlyOriginal?0.7:1}}>
                   <div style={{width:14,height:14,borderRadius:7,background:"white",position:"absolute",top:2,left:g.discountEnabled?18:2,transition:"left 0.2s",boxShadow:"0 1px 2px rgba(0,0,0,0.2)"}}/></button>
                 <span style={{fontSize:10,fontWeight:600,color:"#64748b"}}>Discount Rate (NPV)</span>
                 <Tip text="Adjusts future savings to today's dollars. 8% standard. Ask finance."/></div>
-              {g.discountEnabled&&<Sld label="Discount Rate" value={g.discountRate} onChange={ug("discountRate")} min={0.03} max={0.15} step={0.005} format="pct"/>}
+              {g.discountEnabled&&<Sld label="Discount Rate" value={g.discountRate} onChange={ug("discountRate")} min={0.03} max={0.15} step={0.005} format="pct" disabled={readOnlyOriginal}/>}
             </>)}
           </div>
 
-          {drivers.length===0&&(<div style={{textAlign:"center",padding:"24px 12px"}}>
+          {displayOrder.length===0&&!readOnlyOriginal&&(<div style={{textAlign:"center",padding:"24px 12px"}}>
             <div style={{fontSize:32,marginBottom:8}}>{"\uD83C\uDFAF"}</div>
             <div style={{fontSize:13,fontWeight:700,color:"#334155",marginBottom:4}}>No Value Drivers Selected</div>
             <div style={{fontSize:11,color:"#64748b",marginBottom:12,lineHeight:1.5}}>Add drivers that match your customer's pain points.</div>
             <button onClick={()=>setShowLibrary(true)} style={{padding:"10px 20px",border:"none",borderRadius:8,background:"linear-gradient(135deg,#3b82f6,#06b6d4)",color:"white",cursor:"pointer",fontSize:13,fontWeight:700,boxShadow:"0 4px 12px rgba(59,130,246,0.3)"}}>+ Add Value Drivers</button>
           </div>)}
-          {drivers.map(driver=>(<div key={driver.id} style={{marginBottom:8,opacity:driver.enabled?1:0.45}}>
-            <div style={{display:"flex",alignItems:"center",gap:4,padding:"5px 0",borderBottom:`2px solid ${driver.color}`,marginBottom:openSections[driver.id]&&driver.enabled?6:0}}>
-              {editMode&&<input type="checkbox" checked={driver.enabled} onChange={()=>setDrivers(p=>p.map(d=>d.id===driver.id?{...d,enabled:!d.enabled}:d))} style={{accentColor:driver.color,cursor:"pointer"}}/>}
-              <button onClick={()=>driver.enabled&&ts(driver.id)} style={{flex:1,border:"none",background:"none",cursor:driver.enabled?"pointer":"default",textAlign:"left",display:"flex",alignItems:"center",gap:4,padding:0}}>
-                <span style={{fontSize:10.5,fontWeight:700,color:driver.color,textTransform:"uppercase",letterSpacing:"0.04em",flex:1}}>{driver.name}</span><Tip text={driver.tip}/></button>
-              {editMode&&<button onClick={()=>setEditingDriver(driver)} style={{border:"none",background:"none",cursor:"pointer",fontSize:13,color:"#94a3b8",padding:"0 3px"}}>{"\u270E"}</button>}
-              {driver.enabled&&<span onClick={()=>ts(driver.id)} style={{fontSize:9,color:"#94a3b8",transform:openSections[driver.id]?"rotate(180deg)":"rotate(0)",transition:"transform 0.2s",cursor:"pointer"}}>{"\u25BC"}</span>}
-            </div>
-            {openSections[driver.id]&&driver.enabled&&<DriverInputs driver={driver} onChange={upd=>setDrivers(p=>p.map(d=>d.id===upd.id?upd:d))}/>}
-          </div>))}
-          {(drivers.length>0)&&(<button onClick={()=>setShowLibrary(true)} style={{width:"100%",padding:"10px",border:"2px dashed #cbd5e1",borderRadius:8,background:"white",cursor:"pointer",fontSize:12,fontWeight:600,color:"#64748b",marginBottom:10,display:"flex",alignItems:"center",justifyContent:"center",gap:6}}>
+          {displayOrder.length>0&&displayOrder.map((item,idx)=>{const isSection=item.type==="section";const catColor=isSection?(CAT_COLORS[item.category]||"#475569"):null;const driver=!isSection?drivers.find(d=>d.id===item.id):null;if(!isSection&&!driver)return null;const prevSecIdx=getPrevSectionIndex(displayOrder,idx);const canMoveUp=isSection&&prevSecIdx>=0&&!readOnlyOriginal;const canMoveDown=isSection&&getNextSectionIndex(displayOrder,idx)<displayOrder.length&&!readOnlyOriginal;return(
+            <div key={isSection?"sec_"+item.category+idx:item.id} draggable={!isSection&&!readOnlyOriginal} onDragStart={!isSection&&!readOnlyOriginal?e=>{if(!e.target.closest("[data-drag-handle]")){e.preventDefault();return;}e.dataTransfer.setData("text/plain",idx);e.dataTransfer.effectAllowed="move";}:undefined} onDragOver={!isSection?e=>{e.preventDefault();e.dataTransfer.dropEffect="move";}:undefined} onDrop={!isSection&&!readOnlyOriginal?e=>{e.preventDefault();const from=Number(e.dataTransfer.getData("text/plain"));if(from===idx)return;const next=[...displayOrder];const [rem]=next.splice(from,1);next.splice(idx,0,rem);setDisplayOrder(next);const sectionBefore=getSectionBeforeDriver(next,rem.type==="driver"?rem.id:null);if(rem.type==="driver"&&sectionBefore){const newColor=CAT_COLORS[sectionBefore]||"#475569";setDrivers(p=>p.map(d=>d.id===rem.id?{...d,category:sectionBefore,color:newColor}:d));}}:undefined} style={{marginBottom:isSection?4:8,opacity:!isSection&&driver&&!driver.enabled?0.45:1,cursor:isSection?"default":readOnlyOriginal?"default":"grab"}}>
+              {isSection?(<div style={{display:"flex",alignItems:"center",gap:6,padding:"6px 0",borderBottom:`2px solid ${catColor}`,fontSize:12.5,fontWeight:700,color:catColor,textTransform:"uppercase",letterSpacing:"0.04em"}}>
+                <button type="button" onClick={()=>!readOnlyOriginal&&setDisplayOrder(moveSectionBlockUp(displayOrder,idx))} disabled={!canMoveUp} style={{width:18,height:18,display:"flex",alignItems:"center",justifyContent:"center",border:"1px solid #cbd5e1",borderRadius:3,background:canMoveUp?"#f8fafc":"#f1f5f9",cursor:canMoveUp?"pointer":"default",color:canMoveUp?catColor:"#94a3b8",fontSize:10,lineHeight:1}}>↑</button>
+                <button type="button" onClick={()=>!readOnlyOriginal&&setDisplayOrder(moveSectionBlockDown(displayOrder,idx))} disabled={!canMoveDown} style={{width:18,height:18,display:"flex",alignItems:"center",justifyContent:"center",border:"1px solid #cbd5e1",borderRadius:3,background:canMoveDown?"#f8fafc":"#f1f5f9",cursor:canMoveDown?"pointer":"default",color:canMoveDown?catColor:"#94a3b8",fontSize:10,lineHeight:1}}>↓</button>
+                <span style={{flex:1}}>{item.category}</span></div>):(<>
+                <div style={{display:"flex",alignItems:"center",gap:4,padding:"5px 0",borderBottom:`2px solid ${CAT_COLORS[driver.category]||driver.color}`,marginBottom:openSections[driver.id]&&driver.enabled?6:0}}>
+                  {editMode&&<input type="checkbox" checked={driver.enabled} onChange={()=>!readOnlyOriginal&&setDrivers(p=>p.map(d=>d.id===driver.id?{...d,enabled:!d.enabled}:d))} disabled={readOnlyOriginal} style={{accentColor:CAT_COLORS[driver.category]||driver.color,cursor:readOnlyOriginal?"default":"pointer"}}/>}
+                  {!readOnlyOriginal&&<span data-drag-handle style={{opacity:0.6,cursor:"grab",fontSize:10}}>⋮⋮</span>}
+                  <button onClick={()=>driver.enabled&&ts(driver.id)} style={{flex:1,border:"none",background:"none",cursor:driver.enabled?"pointer":"default",textAlign:"left",display:"flex",alignItems:"center",gap:2,padding:0,minWidth:0}}>
+                    <span style={{fontSize:10.5,fontWeight:700,color:CAT_COLORS[driver.category]||driver.color,textTransform:"uppercase",letterSpacing:"0.04em",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1,minWidth:0}}>{driver.name}</span><Tip text={driver.tip} alignLeft/></button>
+                  {!readOnlyOriginal&&<span onClick={e=>{e.stopPropagation();const newId="copy_"+driver.id+"_"+Date.now();const copy={...driver,id:newId,name:(driver.name||"").trim()+" (copy)",inputs:{...driver.inputs},enabled:true};setDrivers(p=>[...p,copy]);setDisplayOrder(prev=>{const next=[...prev];next.splice(idx+1,0,{type:"driver",id:newId});return next;});}} style={{cursor:"pointer",display:"inline-flex",alignItems:"center",justifyContent:"center",flexShrink:0}} title="Duplicate this value driver">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#64748b" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="2" width="14" height="18" rx="1"/><rect x="8" y="5" width="14" height="18" rx="1"/></svg>
+                  </span>}
+                  {editMode&&!readOnlyOriginal&&<button onClick={()=>setEditingDriver(driver)} style={{border:"none",background:"none",cursor:"pointer",fontSize:13,color:"#94a3b8",padding:"0 3px"}}>{"\u270E"}</button>}
+                  {driver.enabled&&<span onClick={()=>ts(driver.id)} style={{fontSize:9,color:"#94a3b8",transition:"transform 0.2s",cursor:"pointer"}}>{openSections[driver.id]?"\u25BC":"\u25C0"}</span>}
+                </div>
+                {openSections[driver.id]&&driver.enabled&&<DriverInputs driver={driver} onChange={upd=>setDrivers(p=>p.map(d=>d.id===upd.id?upd:d))} currency={g.currency} horizon={g.horizon} readOnly={readOnlyOriginal}/>}
+              </>)}
+            </div>);})}
+          {displayOrder.length>0&&!readOnlyOriginal&&(<button onClick={()=>setShowLibrary(true)} style={{width:"100%",padding:"10px",border:"2px dashed #cbd5e1",borderRadius:8,background:"white",cursor:"pointer",fontSize:12,fontWeight:600,color:"#64748b",marginBottom:10,display:"flex",alignItems:"center",justifyContent:"center",gap:6}}>
             <span style={{fontSize:16,lineHeight:1}}>+</span> Add Value Drivers</button>)}
-          {/* LEGACY CONSOLIDATION */}
-          <div style={{marginBottom:8}}>
-            <button onClick={()=>ts("_l4")} style={{width:"100%",display:"flex",alignItems:"center",padding:"5px 0",border:"none",background:"none",cursor:"pointer",borderBottom:"2px solid #10b981",marginBottom:openSections._l4?6:0,textAlign:"left"}}>
-              <span style={{fontSize:10.5,fontWeight:700,color:"#10b981",textTransform:"uppercase",letterSpacing:"0.04em",flex:1}}>Legacy Tool(s) Savings</span>
-              <Tip text="Enter the total annual cost of ALL tools being replaced or reduced each year — primary platform, add-ons, point solutions, everything. As departments migrate to Wrike, costs should decrease. Legacy Savings = Current Annual Cost minus Phase-Down Cost. FTE Avoidance is a separate benefit line item."/><span style={{fontSize:9,color:"#94a3b8",transform:openSections._l4?"rotate(180deg)":"rotate(0)",transition:"transform 0.2s",marginLeft:4}}>{"\u25BC"}</span></button>
-            {openSections._l4&&(<>
-              <Inp label="Current Annual Cost (do-nothing)" value={g.legacyFullCost} onChange={ug("legacyFullCost")} prefix={g.currency} help="What you pay per year for ALL legacy tools if nothing changes. This is the baseline for Cost of Inaction."/>
-              <div style={{fontSize:10,fontWeight:600,color:"#10b981",marginTop:4,marginBottom:4}}>Phase-Down Plan with Wrike <Tip text="Enter what you'll actually pay for legacy tools each year as you migrate. The SAVINGS is the difference between your current cost and this phase-down amount."/></div>
-              {Array.from({length:g.horizon},(_,i)=>{const sav=g.legacyFullCost-(g.legacyPhaseDown[i]||0);return(<div key={i}><Inp label={`Year ${i+1} Legacy Cost (with Wrike)`} value={g.legacyPhaseDown[i]||0} onChange={v=>setPhaseDown(i,v)} prefix={g.currency} help={`What you'll still pay in Year ${i+1}. Savings: $${g.legacyFullCost.toLocaleString()} - $${(g.legacyPhaseDown[i]||0).toLocaleString()} = $${Math.max(0,sav).toLocaleString()}`}/></div>);})}
-              <Inp label="FTEs Avoided / Year" value={g.fteAvoided} onChange={ug("fteAvoided")} step={0.5} suffix="FTEs" help="Hires avoided because Wrike absorbs workload growth."/>
-              <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:6}}>
-                <button onClick={()=>setG(p=>({...p,fteAvoidY1:!p.fteAvoidY1}))} style={{width:34,height:18,borderRadius:9,border:"none",cursor:"pointer",position:"relative",background:g.fteAvoidY1?"#3b82f6":"#cbd5e1",transition:"background 0.2s",flexShrink:0}}>
-                  <div style={{width:14,height:14,borderRadius:7,background:"white",position:"absolute",top:2,left:g.fteAvoidY1?18:2,transition:"left 0.2s",boxShadow:"0 1px 2px rgba(0,0,0,0.2)"}}/></button>
-                <span style={{fontSize:10,fontWeight:600,color:"#64748b"}}>Include Y1 FTE avoidance</span>
-                <Tip text="When ON, Y1 FTE savings prorated by adoption ramp. Default OFF — savings start Y2."/></div>
-            </>)}
-          </div>
-          {/* WRIKE INVESTMENT - per year costs */}
+          {/* WRIKE INVESTMENT */}
           <div style={{marginBottom:8}}>
             <button onClick={()=>ts("_wrike")} style={{width:"100%",display:"flex",alignItems:"center",padding:"5px 0",border:"none",background:"none",cursor:"pointer",borderBottom:"2px solid #3b82f6",marginBottom:openSections._wrike?6:0,textAlign:"left"}}>
               <span style={{fontSize:10.5,fontWeight:700,color:"#3b82f6",textTransform:"uppercase",letterSpacing:"0.04em",flex:1}}>Wrike Investment</span>
-              <span style={{fontSize:9,color:"#94a3b8",transform:openSections._wrike?"rotate(180deg)":"rotate(0)",transition:"transform 0.2s",marginLeft:4}}>{"\u25BC"}</span></button>
+              <span style={{fontSize:9,color:"#94a3b8",transition:"transform 0.2s",marginLeft:4}}>{openSections._wrike?"\u25BC":"\u25C0"}</span></button>
             {openSections._wrike&&(<>
               <div style={{fontSize:10,fontWeight:600,color:"#3b82f6",marginBottom:4}}>Annual License Cost <Tip text="Enter the actual Wrike license cost per year from your contract or quote. If flat-rate bundled, enter the total. If per-user, calculate seats × rate."/></div>
-              {Array.from({length:g.horizon},(_,i)=>(<Inp key={i} label={`Year ${i+1} Wrike License`} value={g.wrikeCostByYear[i]||0} onChange={v=>setWrikeCost(i,v)} prefix={g.currency}/>))}
-              <Inp label="Prof Services" value={g.wrikeProfServices} onChange={ug("wrikeProfServices")} prefix={g.currency} help="One-time professional services (Y1 only)."/>
-              <div style={{fontSize:10,fontWeight:600,color:"#3b82f6",marginTop:6,marginBottom:4}}>Additional SKUs <Tip text="Wrike Lock, Wrike Integrate, or other add-on products. Toggle whether each is a one-time (Y1 only) or recurring annual cost."/></div>
+              {Array.from({length:g.horizon},(_,i)=>(<Inp key={i} label={`Year ${i+1} Wrike License`} value={g.wrikeCostByYear[i]||0} onChange={v=>setWrikeCost(i,v)} prefix={g.currency} disabled={readOnlyOriginal}/>))}
+              <Inp label="Professional Services" value={g.wrikeProfServices} onChange={ug("wrikeProfServices")} prefix={g.currency} help="One-time professional services (Y1 only)." helpAlignRight disabled={readOnlyOriginal}/>
+              <div style={{fontSize:10,fontWeight:600,color:"#3b82f6",marginTop:6,marginBottom:4}}>Additional SKUs <Tip text="Wrike Lock, Wrike Integrate, or other add-on products. Toggle whether each is a one-time (Y1 only) or recurring annual cost." alignRight/></div>
               {g.wrikeAdditionalSKUs.map((sku,idx)=>(<div key={idx} style={{marginBottom:6,padding:"6px 8px",background:"#f8fafc",borderRadius:5,border:"1px solid #e2e8f0"}}>
                 <div style={{display:"flex",gap:4,alignItems:"center",marginBottom:4}}>
-                  <input value={sku.name} onChange={e=>{const a=[...g.wrikeAdditionalSKUs];a[idx]={...a[idx],name:e.target.value};setG(p=>({...p,wrikeAdditionalSKUs:a}));}} placeholder="SKU name" style={{flex:1,padding:"4px 6px",border:"1px solid #cbd5e1",borderRadius:4,fontSize:11,outline:"none"}}/>
+                  <input value={sku.name} onChange={e=>{if(readOnlyOriginal)return;const a=[...g.wrikeAdditionalSKUs];a[idx]={...a[idx],name:e.target.value};setG(p=>({...p,wrikeAdditionalSKUs:a}));}} placeholder="SKU name" readOnly={readOnlyOriginal} disabled={readOnlyOriginal} style={{flex:1,padding:"4px 6px",border:"1px solid #cbd5e1",borderRadius:4,fontSize:11,fontFamily:"'Montserrat',sans-serif",outline:"none",background:readOnlyOriginal?"#f1f5f9":"white"}}/>
                   <span style={{fontSize:11,color:"#475569"}}>{g.currency}</span>
-                  <input type="number" value={sku.annual} onChange={e=>{const a=[...g.wrikeAdditionalSKUs];a[idx]={...a[idx],annual:Number(e.target.value)};setG(p=>({...p,wrikeAdditionalSKUs:a}));}} style={{width:80,padding:"4px 6px",border:"1px solid #cbd5e1",borderRadius:4,fontSize:11,fontFamily:"'JetBrains Mono',monospace",outline:"none"}}/>
-                  <button onClick={()=>{const a=[...g.wrikeAdditionalSKUs];a.splice(idx,1);setG(p=>({...p,wrikeAdditionalSKUs:a}));}} style={{border:"none",background:"none",cursor:"pointer",fontSize:14,color:"#dc2626",padding:"0 2px"}}>{"×"}</button>
+                  <FormattedNumInput value={sku.annual} onChange={v=>{if(readOnlyOriginal)return;const a=[...g.wrikeAdditionalSKUs];a[idx]={...a[idx],annual:v};setG(p=>({...p,wrikeAdditionalSKUs:a}));}} style={{width:80,padding:"4px 6px",border:"1px solid #cbd5e1",borderRadius:4,fontSize:11,fontFamily:"'Montserrat',sans-serif",outline:"none",background:readOnlyOriginal?"#f1f5f9":"white"}} readOnly={readOnlyOriginal}/>
+                  {!readOnlyOriginal&&<button onClick={()=>{const a=[...g.wrikeAdditionalSKUs];a.splice(idx,1);setG(p=>({...p,wrikeAdditionalSKUs:a}));}} style={{border:"none",background:"none",cursor:"pointer",fontSize:14,color:"#dc2626",padding:"0 2px"}}>{"×"}</button>}
                 </div>
                 <div style={{display:"flex",gap:3,background:"#e2e8f0",borderRadius:4,padding:2,width:"fit-content"}}>
-                  <button onClick={()=>{const a=[...g.wrikeAdditionalSKUs];a[idx]={...a[idx],oneTime:false};setG(p=>({...p,wrikeAdditionalSKUs:a}));}} style={{padding:"2px 8px",borderRadius:3,border:"none",cursor:"pointer",fontSize:9,fontWeight:600,background:!sku.oneTime?"white":"transparent",color:!sku.oneTime?"#3b82f6":"#94a3b8",boxShadow:!sku.oneTime?"0 1px 2px rgba(0,0,0,0.1)":"none"}}>Recurring</button>
-                  <button onClick={()=>{const a=[...g.wrikeAdditionalSKUs];a[idx]={...a[idx],oneTime:true};setG(p=>({...p,wrikeAdditionalSKUs:a}));}} style={{padding:"2px 8px",borderRadius:3,border:"none",cursor:"pointer",fontSize:9,fontWeight:600,background:sku.oneTime?"white":"transparent",color:sku.oneTime?"#f59e0b":"#94a3b8",boxShadow:sku.oneTime?"0 1px 2px rgba(0,0,0,0.1)":"none"}}>One-Time (Y1)</button>
+                  <button onClick={()=>{if(readOnlyOriginal)return;const a=[...g.wrikeAdditionalSKUs];a[idx]={...a[idx],oneTime:false};setG(p=>({...p,wrikeAdditionalSKUs:a}));}} disabled={readOnlyOriginal} style={{padding:"2px 8px",borderRadius:3,border:"none",cursor:readOnlyOriginal?"default":"pointer",fontSize:9,fontWeight:600,background:!sku.oneTime?"white":"transparent",color:!sku.oneTime?"#3b82f6":"#94a3b8",boxShadow:!sku.oneTime?"0 1px 2px rgba(0,0,0,0.1)":"none",opacity:readOnlyOriginal?0.7:1}}>Recurring</button>
+                  <button onClick={()=>{if(readOnlyOriginal)return;const a=[...g.wrikeAdditionalSKUs];a[idx]={...a[idx],oneTime:true};setG(p=>({...p,wrikeAdditionalSKUs:a}));}} disabled={readOnlyOriginal} style={{padding:"2px 8px",borderRadius:3,border:"none",cursor:readOnlyOriginal?"default":"pointer",fontSize:9,fontWeight:600,background:sku.oneTime?"white":"transparent",color:sku.oneTime?"#f59e0b":"#94a3b8",boxShadow:sku.oneTime?"0 1px 2px rgba(0,0,0,0.1)":"none",opacity:readOnlyOriginal?0.7:1}}>One-Time (Y1)</button>
                 </div>
               </div>))}
-              <button onClick={()=>setG(p=>({...p,wrikeAdditionalSKUs:[...p.wrikeAdditionalSKUs,{name:"",annual:0,oneTime:false}]}))} style={{fontSize:10,color:"#3b82f6",background:"none",border:"none",cursor:"pointer",fontWeight:600,padding:"2px 0"}}>+ Add SKU</button>
+              {!readOnlyOriginal&&<button onClick={()=>setG(p=>({...p,wrikeAdditionalSKUs:[...p.wrikeAdditionalSKUs,{name:"",annual:0,oneTime:false}]}))} style={{fontSize:10,color:"#3b82f6",background:"none",border:"none",cursor:"pointer",fontWeight:600,padding:"2px 0"}}>+ Add SKU</button>}
             </>)}
           </div>
-        </div>}
-        <button onClick={()=>setPanelOpen(p=>!p)} style={{width:20,minWidth:20,background:panelOpen?"#e2e8f0":"#3b82f6",border:"none",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",borderRight:"1px solid #cbd5e1",transition:"background 0.2s"}}>
+        </div>
+        <div onMouseDown={()=>setResizing(true)} onTouchStart={()=>setResizing(true)} style={{width:6,minWidth:6,cursor:"col-resize",background:resizing?"#94a3b8":"#e2e8f0",flexShrink:0,alignSelf:"stretch"}} title="Drag to resize"/></>}
+        <button onClick={()=>setPanelOpen(p=>!p)} style={{width:20,minWidth:20,background:panelOpen?"#e2e8f0":"#3b82f6",border:"none",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",borderRight:"1px solid #cbd5e1",transition:"background 0.2s"}} title="Assumptions">
           <span style={{fontSize:11,color:panelOpen?"#64748b":"white",transform:panelOpen?"rotate(0)":"rotate(180deg)",transition:"transform 0.2s"}}>{"\u25C0"}</span>
         </button>
         {/* RIGHT */}
-        <div style={{flex:1,padding:"16px 22px",overflowY:"auto",maxHeight:"calc(100vh - 60px)"}}>
+        <div style={{flex:1,minWidth:0,padding:"16px 22px",overflowY:"auto",maxHeight:"calc(100vh - 60px)"}}>
           <div style={{display:"flex",gap:8,marginBottom:14,flexWrap:"wrap"}}>
-            <Stat label={g.discountEnabled?"NPV":"Net Value"} value={fmtK(model.npv)} color={model.npv>=0?"#059669":"#dc2626"} bg={model.npv>=0?"#ecfdf5":"#fef2f2"} sub={g.discountEnabled?`${g.horizon}yr @ ${pct(g.discountRate)}`:`${g.horizon}yr total`}/>
-            <Stat label="Total Hours Regained" value={fmtHrs(model.totalHours)} color="#7c3aed" bg="#f5f3ff" sub={`${g.horizon}yr · included in net value`}/>
-            {el.some(d=>d.type==="project_delay")&&<Stat label="Project-Days Saved" value={Math.round(model.totalProjectDays).toLocaleString()+" days"} color="#0ea5e9" bg="#f0f9ff" sub={`${g.horizon}yr · included in net value`}/>}
-            <Stat label="Payback" value={model.pbm?`${model.pbm}mo`:"N/A"} color="#1e293b" bg="#f5f3ff" sub={model.pbm?`~${(model.pbm/12).toFixed(1)} years`:""}/>
-            <Stat label="Cost of Inaction" value={fmtK(model.coiTotal)} color="#dc2626" bg="#fef2f2" sub={`${g.horizon}yr do-nothing cost`}/>
+            <Stat labelSize={11} label={g.discountEnabled?"NPV":"Net Value"} value={fmtK(model.npv)} color={model.npv>=0?"#059669":"#dc2626"} bg={model.npv>=0?"#ecfdf5":"#fef2f2"} sub={g.discountEnabled?`${g.horizon}yr @ ${pct(g.discountRate)}`:`${g.horizon}yr total`}/>
+            <Stat labelSize={11} label="Total Hours Regained" value={fmtHrs(model.totalHours)} color="#7c3aed" bg="#f5f3ff" sub={`${g.horizon}yr · included in net value`}/>
+            <Stat labelSize={11} label="Payback" value={model.pbm?`${model.pbm}mo`:"N/A"} color="#1e293b" bg="#f5f3ff" sub={model.pbm?`~${(model.pbm/12).toFixed(1)} years`:""}/>
+            <Stat labelSize={11} label="Cost of Inaction" value={fmtK(model.tb)} color="#b45309" bg="#fffbeb" sub={`${g.horizon}yr total value without Wrike`}/>
           </div>
+          {el.some(d=>d.type==="project_delay")&&<div style={{display:"flex",gap:8,marginBottom:14,flexWrap:"wrap"}}>
+            <Stat label="Project-Days Saved" value={Math.round(model.totalProjectDays).toLocaleString()+" days"} color="#0ea5e9" bg="#f0f9ff" sub={`${g.horizon}yr · included in net value`}/>
+          </div>}
           <div style={{display:"flex",gap:2,marginBottom:14,background:"#f1f5f9",borderRadius:6,padding:2}}>
-            {tabs.map(t=>{const c=TC[t.id];const active=tab===t.id;return<button key={t.id} onClick={()=>setTab(t.id)} style={{flex:1,padding:"7px 8px",borderRadius:4,border:"none",cursor:"pointer",fontSize:11,fontWeight:600,background:active?"white":"transparent",color:active?c:"#94a3b8",boxShadow:active?"0 1px 3px rgba(0,0,0,0.1)":"none",borderBottom:active?`2.5px solid ${c}`:"2.5px solid transparent",transition:"all 0.15s"}}>{t.label}</button>;})}
+            {tabs.map(t=>{const c=TC[t.id];const active=tab===t.id;return<button key={t.id} onClick={()=>setTab(t.id)} style={{flex:1,padding:"7px 8px",borderRadius:4,border:"none",cursor:"pointer",fontSize:11,fontWeight:600,fontFamily:"'Montserrat',sans-serif",background:active?"white":"transparent",color:active?c:"#94a3b8",boxShadow:active?"0 1px 3px rgba(0,0,0,0.1)":"none",borderBottom:active?`2.5px solid ${c}`:"2.5px solid transparent",transition:"all 0.15s"}}>{t.label}</button>;})}
           </div>
 
           {/* DRIVERS TAB */}
@@ -2537,26 +2599,16 @@ function App(){
                   </div>
                 )}
               </div>
-              {el.map(d=>{const v=model.lt[d.id]||0;const h=model.lth[d.id]||0;const hasHours=(d.type==="time"||d.type==="incident");const displayVal=showHours&&hasHours?h:v;const allVals=el.map(d2=>showHours&&(d2.type==="time"||d2.type==="incident")?model.lth[d2.id]||0:model.lt[d2.id]||0);const maxVal=Math.max(...allVals,model.lt._l4||0,model.lt._fte||0);const w=maxVal>0?Math.max(3,(displayVal/maxVal)*100):0;return(
-                <div key={d.id} style={{marginBottom:7}}>
+              {(()=>{let currentSectionColor="#475569";return displayOrder.map((item,i)=>{
+                if(item.type==="section"){currentSectionColor=CAT_COLORS[item.category]||"#475569";return(<div key={"sec_"+item.category+i} style={{fontSize:13,fontWeight:700,color:currentSectionColor,textTransform:"uppercase",letterSpacing:"0.04em",marginTop:i===0?0:12,marginBottom:6,borderBottom:`2px solid ${currentSectionColor}`,paddingBottom:4}}>{item.category}</div>);}
+                const d=drivers.find(x=>x.id===item.id);if(!d||!d.enabled)return null;const v=model.lt[d.id]||0;const h=model.lth[d.id]||0;const hasHours=(d.type==="time"||d.type==="incident");const displayVal=showHours&&hasHours?h:v;const barColor=showHours&&hasHours?"#7c3aed":currentSectionColor;const allVals=el.map(d2=>showHours&&(d2.type==="time"||d2.type==="incident")?model.lth[d2.id]||0:model.lt[d2.id]||0);const maxVal=Math.max(...allVals);const w=maxVal>0?Math.max(3,(displayVal/maxVal)*100):0;
+                return(<div key={d.id} style={{marginBottom:7}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:2}}>
-                    <div style={{display:"flex",alignItems:"center"}}><span style={{fontSize:11,color:"#334155",fontWeight:500}}>{d.name}</span><Tip text={d.tip}/></div>
-                    <span style={{fontSize:12,fontWeight:700,color:showHours&&hasHours?"#7c3aed":d.color,fontFamily:"'JetBrains Mono',monospace"}}>{showHours&&hasHours?fmtHrs(h):fmtK(v)}</span>
+                    <div style={{display:"flex",alignItems:"center"}}><span style={{fontSize:11,color:"#1e293b",fontWeight:500}}>{d.name}</span><Tip text={d.tip}/></div>
+                    <span style={{fontSize:12,fontWeight:700,color:barColor,fontFamily:"'Montserrat',sans-serif"}}>{showHours&&hasHours?fmtHrs(h):fmtK(v)}</span>
                   </div>
-                  <div style={{height:7,background:"#f1f5f9",borderRadius:4,overflow:"hidden"}}><div style={{height:"100%",width:`${w}%`,background:showHours&&hasHours?"#7c3aed":d.color,borderRadius:4,transition:"width 0.4s"}}/></div>
-                </div>);})}
-              <div style={{marginBottom:7,opacity:showHours?0.4:1}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:2}}>
-                  <span style={{fontSize:11,color:"#334155",fontWeight:500}}>Legacy Tool(s) Savings</span>
-                  <span style={{fontSize:12,fontWeight:700,color:"#10b981",fontFamily:"'JetBrains Mono',monospace"}}>{fmtK(model.lt._l4)}</span></div>
-                <div style={{height:7,background:"#f1f5f9",borderRadius:4,overflow:"hidden"}}><div style={{height:"100%",width:`${!showHours&&maxLev>0?Math.max(3,(model.lt._l4/maxLev)*100):0}%`,background:"#10b981",borderRadius:4,transition:"width 0.4s"}}/></div>
-              </div>
-              <div style={{marginBottom:7,opacity:showHours?0.4:1}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:2}}>
-                  <span style={{fontSize:11,color:"#334155",fontWeight:500}}>FTE Avoidance</span>
-                  <span style={{fontSize:12,fontWeight:700,color:"#059669",fontFamily:"'JetBrains Mono',monospace"}}>{fmtK(model.lt._fte)}</span></div>
-                <div style={{height:7,background:"#f1f5f9",borderRadius:4,overflow:"hidden"}}><div style={{height:"100%",width:`${!showHours&&maxLev>0?Math.max(3,(model.lt._fte/maxLev)*100):0}%`,background:"#059669",borderRadius:4,transition:"width 0.4s"}}/></div>
-              </div>
+                  <div style={{height:7,background:"#f1f5f9",borderRadius:4,overflow:"hidden"}}><div style={{height:"100%",width:`${w}%`,background:barColor,borderRadius:4,transition:"width 0.4s"}}/></div>
+                </div>);})})()}
             </div>
             <div style={{background:"#f8fafc",borderRadius:8,padding:"14px 16px",border:"1px solid #e2e8f0"}}>
               <div style={{fontSize:12,fontWeight:700,color:"#334155",marginBottom:10}}>Annual Net Benefit</div>
@@ -2565,57 +2617,14 @@ function App(){
                   <div key={y.year} style={{flex:1,textAlign:"center"}}>
                     <div style={{fontSize:11,fontWeight:700,marginBottom:4}}>Y{y.year}</div>
                     <div style={{display:"flex",flexDirection:"column",alignItems:"center",height:110,justifyContent:"flex-end"}}>
-                      <div style={{fontSize:11,fontWeight:700,color:pos?"#059669":"#dc2626",marginBottom:3,fontFamily:"'JetBrains Mono',monospace"}}>{fmtK(y.net)}</div>
+                      <div style={{fontSize:11,fontWeight:700,color:pos?"#059669":"#dc2626",marginBottom:3,fontFamily:"'Montserrat',sans-serif"}}>{fmtK(y.net)}</div>
                       <div style={{width:"60%",height:h,borderRadius:"4px 4px 0 0",background:pos?"linear-gradient(180deg,#10b981,#059669)":"linear-gradient(180deg,#f87171,#dc2626)",transition:"height 0.3s"}}/></div>
                     <div style={{marginTop:4,fontSize:9,color:"#94a3b8"}}>
-                      <div>Cost: <span style={{color:"#dc2626",fontFamily:"'JetBrains Mono',monospace"}}>{fmtK(y.totalCost)}</span></div>
-                      <div>Benefit: <span style={{color:"#059669",fontFamily:"'JetBrains Mono',monospace"}}>{fmtK(y.totalBenefit)}</span></div></div>
+                      <div>Cost: <span style={{color:"#dc2626",fontFamily:"'Montserrat',sans-serif"}}>{fmtK(y.totalCost)}</span></div>
+                      <div>Benefit: <span style={{color:"#059669",fontFamily:"'Montserrat',sans-serif"}}>{fmtK(y.totalBenefit)}</span></div></div>
                   </div>);})}
               </div>
             </div></>)}</>)}
-
-          {/* INACTION TAB */}
-          {tab==="inaction"&&(<>
-            <div style={{background:"#fef2f2",borderRadius:8,padding:14,marginBottom:14,border:"1px solid #fecaca"}}>
-              <div style={{fontSize:13,fontWeight:700,color:"#991b1b",marginBottom:4}}>What happens if {g.customerName||"you"} do nothing?</div></div>
-            <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
-              <thead><tr style={{background:"#fef2f2"}}>
-                <th style={{padding:"8px 10px",textAlign:"left",fontWeight:700,color:"#991b1b",borderBottom:"2px solid #fecaca",fontSize:10}}>Annual Cost</th>
-                {model.years.map(y=><th key={y.year} style={{padding:"8px 10px",textAlign:"right",fontWeight:700,color:"#991b1b",borderBottom:"2px solid #fecaca",fontSize:10}}>Year {y.year}</th>)}
-                <th style={{padding:"8px 10px",textAlign:"right",fontWeight:700,color:"#991b1b",borderBottom:"2px solid #fecaca",fontSize:10}}>Total</th>
-              </tr></thead>
-              <tbody>
-                {/* Legacy Tools */}
-                <tr>
-                  <td style={{padding:"5px 10px",color:"#334155",borderBottom:"1px solid #f1f5f9"}}>Legacy Tools (full cost)</td>
-                  {model.years.map(y=>(<td key={y.year} style={{padding:"5px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",borderBottom:"1px solid #f1f5f9",color:"#dc2626"}}>{fmt(y.coiSS)}</td>))}
-                  <td style={{padding:"5px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontWeight:700,borderBottom:"1px solid #f1f5f9",borderLeft:"2px solid #fecaca",color:"#991b1b"}}>{fmt(model.years.reduce((a,y)=>a+y.coiSS,0))}</td>
-                </tr>
-                {/* Per-driver cost of inaction lines */}
-                {el.map(d=>{const total=model.years.reduce((a,y)=>a+(y.coiByDriver[d.id]||0),0);const coiLabel=d.type==="risk"?"compliance risk exposure":d.type==="revenue"?"unrealized revenue":d.type==="incident"?"incident recovery cost":d.type==="project_delay"?"project delay cost":"wasted productivity";return(
-                  <tr key={d.id}>
-                    <td style={{padding:"5px 10px",color:"#334155",borderBottom:"1px solid #f1f5f9"}}>{d.name} <span style={{fontSize:9,color:"#94a3b8"}}>({coiLabel})</span></td>
-                    {model.years.map(y=>(<td key={y.year} style={{padding:"5px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",borderBottom:"1px solid #f1f5f9",color:"#dc2626"}}>{fmt(y.coiByDriver[d.id]||0)}</td>))}
-                    <td style={{padding:"5px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontWeight:700,borderBottom:"1px solid #f1f5f9",borderLeft:"2px solid #fecaca",color:"#991b1b"}}>{fmt(total)}</td>
-                  </tr>);})}
-                {/* Additional FTEs */}
-                <tr>
-                  <td style={{padding:"5px 10px",color:"#334155",borderBottom:"1px solid #f1f5f9"}}>Additional FTEs for Growth</td>
-                  {model.years.map(y=>(<td key={y.year} style={{padding:"5px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",borderBottom:"1px solid #f1f5f9",color:"#dc2626"}}>{fmt(y.coiFTE)}</td>))}
-                  <td style={{padding:"5px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontWeight:700,borderBottom:"1px solid #f1f5f9",borderLeft:"2px solid #fecaca",color:"#991b1b"}}>{fmt(model.years.reduce((a,y)=>a+y.coiFTE,0))}</td>
-                </tr>
-                {/* TOTAL */}
-                <tr style={{background:"#fef2f2"}}>
-                  <td style={{padding:"5px 10px",fontWeight:700,color:"#991b1b",borderBottom:"1px solid #f1f5f9"}}>TOTAL COST OF INACTION</td>
-                  {model.years.map(y=>(<td key={y.year} style={{padding:"5px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontWeight:700,borderBottom:"1px solid #f1f5f9",color:"#dc2626"}}>{fmt(y.coiTotal)}</td>))}
-                  <td style={{padding:"5px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontWeight:700,borderBottom:"1px solid #f1f5f9",borderLeft:"2px solid #fecaca",color:"#991b1b"}}>{fmt(model.years.reduce((a,y)=>a+y.coiTotal,0))}</td>
-                </tr>
-              </tbody>
-            </table>
-            <div style={{marginTop:14,background:"#f8fafc",borderRadius:8,padding:14,border:"1px solid #e2e8f0"}}>
-              <div style={{fontSize:12,fontWeight:700,marginBottom:4}}>The Bottom Line</div>
-              <div style={{fontSize:12,color:"#475569",lineHeight:1.6}}>Every year {g.customerName||"you"} wait{g.customerName?"s":""}, <span style={{fontWeight:700,color:"#dc2626"}}>{fmtK(model.coiTotal/g.horizon)}</span> is lost to inefficiency, risk, and tools that aren't working. Over {g.horizon} years, that's <span style={{fontWeight:700,color:"#dc2626"}}>{fmtK(model.coiTotal)}</span> walking out the door. Wrike pays for itself in <span style={{fontWeight:700,color:"#059669"}}>{model.pbm?`${model.pbm} months`:"under a year"}</span>{" — "}after that, every dollar saved goes straight to the bottom line.</div>
-            </div></>)}
 
           {/* YEARLY TAB */}
           {tab==="yearly"&&(<div style={{overflowX:"auto"}}>
@@ -2627,30 +2636,28 @@ function App(){
               </tr></thead>
               <tbody>
                 <tr><td colSpan={model.years.length+2} style={{padding:"8px 10px 3px",fontWeight:800,fontSize:9,color:"#dc2626",textTransform:"uppercase",borderBottom:"1px solid #e2e8f0"}}>COSTS</td></tr>
-                {[{l:"Wrike Licenses",k:"wLicCost"},{l:"Prof Services",k:"wProf"},{l:"Migration",k:"wMig"}].filter(row=>model.years.some(y=>y[row.k]>0)).map((row,i)=>{
+                {[{l:"Wrike Licenses",k:"wLicCost"},{l:"Professional Services",k:"wProf"},{l:"Migration",k:"wMig"}].filter(row=>model.years.some(y=>y[row.k]>0)).map((row,i)=>{
                   const total=model.years.reduce((a,y)=>a+y[row.k],0);return(<tr key={`c${i}`}>
                     <td style={{padding:"4px 10px",color:"#334155",borderBottom:"1px solid #f1f5f9",fontSize:10}}>{row.l}</td>
-                    {model.years.map(y=>(<td key={y.year} style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,borderBottom:"1px solid #f1f5f9",color:"#dc2626"}}>{fmt(y[row.k])}</td>))}
-                    <td style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",borderLeft:"2px solid #e2e8f0",color:"#dc2626"}}>{fmt(total)}</td>
+                    {model.years.map(y=>(<td key={y.year} style={{padding:"4px 10px",textAlign:"right",fontFamily:"'Montserrat',sans-serif",fontSize:10,borderBottom:"1px solid #f1f5f9",color:"#dc2626"}}>{fmt(y[row.k])}</td>))}
+                    <td style={{padding:"4px 10px",textAlign:"right",fontFamily:"'Montserrat',sans-serif",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",borderLeft:"2px solid #e2e8f0",color:"#dc2626"}}>{fmt(total)}</td>
                   </tr>);})}
                 {g.wrikeAdditionalSKUs.map((sku,si)=>{const total=model.years.reduce((a,y)=>a+(y.skuByLine[si]?.cost||0),0);return(<tr key={`sku${si}`}>
                     <td style={{padding:"4px 10px",color:"#334155",borderBottom:"1px solid #f1f5f9",fontSize:10}}>{sku.name||"Unnamed SKU"} <span style={{fontSize:9,color:"#94a3b8"}}>({sku.oneTime?"one-time":"recurring"})</span></td>
-                    {model.years.map(y=>(<td key={y.year} style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,borderBottom:"1px solid #f1f5f9",color:"#dc2626"}}>{fmt(y.skuByLine[si]?.cost||0)}</td>))}
-                    <td style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",borderLeft:"2px solid #e2e8f0",color:"#dc2626"}}>{fmt(total)}</td>
+                    {model.years.map(y=>(<td key={y.year} style={{padding:"4px 10px",textAlign:"right",fontFamily:"'Montserrat',sans-serif",fontSize:10,borderBottom:"1px solid #f1f5f9",color:"#dc2626"}}>{fmt(y.skuByLine[si]?.cost||0)}</td>))}
+                    <td style={{padding:"4px 10px",textAlign:"right",fontFamily:"'Montserrat',sans-serif",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",borderLeft:"2px solid #e2e8f0",color:"#dc2626"}}>{fmt(total)}</td>
                   </tr>);})}
                 {(()=>{const total=model.years.reduce((a,y)=>a+y.totalCost,0);return(<tr style={{background:"#fef2f2"}}>
                     <td style={{padding:"4px 10px",fontWeight:700,color:"#dc2626",borderBottom:"1px solid #f1f5f9",fontSize:10}}>Total Cost</td>
-                    {model.years.map(y=>(<td key={y.year} style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",color:"#dc2626"}}>{fmt(y.totalCost)}</td>))}
-                    <td style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",borderLeft:"2px solid #e2e8f0",color:"#dc2626"}}>{fmt(total)}</td>
+                    {model.years.map(y=>(<td key={y.year} style={{padding:"4px 10px",textAlign:"right",fontFamily:"'Montserrat',sans-serif",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",color:"#dc2626"}}>{fmt(y.totalCost)}</td>))}
+                    <td style={{padding:"4px 10px",textAlign:"right",fontFamily:"'Montserrat',sans-serif",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",borderLeft:"2px solid #e2e8f0",color:"#dc2626"}}>{fmt(total)}</td>
                   </tr>);})()}                <tr><td colSpan={model.years.length+2} style={{padding:"8px 10px 3px",fontWeight:800,fontSize:9,color:"#059669",textTransform:"uppercase",borderBottom:"1px solid #e2e8f0"}}>BENEFITS</td></tr>
-                {el.map(d=>{const total=model.years.reduce((a,y)=>a+(y.lv[d.id]||0),0);return(<tr key={d.id}><td style={{padding:"4px 10px",color:"#334155",borderBottom:"1px solid #f1f5f9",fontSize:10}}>{d.name}</td>{model.years.map(y=>(<td key={y.year} style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,borderBottom:"1px solid #f1f5f9"}}>{fmt(y.lv[d.id]||0)}</td>))}<td style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",borderLeft:"2px solid #e2e8f0"}}>{fmt(total)}</td></tr>);})}
-                <tr><td style={{padding:"4px 10px",color:"#334155",borderBottom:"1px solid #f1f5f9",fontSize:10}}>Legacy Tool(s) Savings</td>{model.years.map(y=>(<td key={y.year} style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,borderBottom:"1px solid #f1f5f9"}}>{fmt(y.legacySav)}</td>))}<td style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",borderLeft:"2px solid #e2e8f0"}}>{fmt(model.lt._l4)}</td></tr>
-                <tr><td style={{padding:"4px 10px",color:"#334155",borderBottom:"1px solid #f1f5f9",fontSize:10}}>FTE Avoidance</td>{model.years.map(y=>(<td key={y.year} style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,borderBottom:"1px solid #f1f5f9"}}>{fmt(y.fteSav)}</td>))}<td style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",borderLeft:"2px solid #e2e8f0"}}>{fmt(model.lt._fte)}</td></tr>
-                <tr style={{background:"#f0fdf4"}}><td style={{padding:"4px 10px",fontWeight:700,color:"#059669",borderBottom:"1px solid #f1f5f9",fontSize:10}}>Total Benefit</td>{model.years.map(y=>(<td key={y.year} style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",color:"#059669"}}>{fmt(y.totalBenefit)}</td>))}<td style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",borderLeft:"2px solid #e2e8f0",color:"#059669"}}>{fmt(model.years.reduce((a,y)=>a+y.totalBenefit,0))}</td></tr>
+                {displayOrder.filter(x=>x.type==="driver").map(item=>{const d=drivers.find(x=>x.id===item.id);if(!d||!d.enabled)return null;const total=model.years.reduce((a,y)=>a+(y.lv[d.id]||0),0);return(<tr key={d.id}><td style={{padding:"4px 10px",color:"#334155",borderBottom:"1px solid #f1f5f9",fontSize:10}}>{d.name}</td>{model.years.map(y=>(<td key={y.year} style={{padding:"4px 10px",textAlign:"right",fontFamily:"'Montserrat',sans-serif",fontSize:10,borderBottom:"1px solid #f1f5f9"}}>{fmt(y.lv[d.id]||0)}</td>))}<td style={{padding:"4px 10px",textAlign:"right",fontFamily:"'Montserrat',sans-serif",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",borderLeft:"2px solid #e2e8f0"}}>{fmt(total)}</td></tr>);})}
+                <tr style={{background:"#f0fdf4"}}><td style={{padding:"4px 10px",fontWeight:700,color:"#059669",borderBottom:"1px solid #f1f5f9",fontSize:10}}>Total Benefit</td>{model.years.map(y=>(<td key={y.year} style={{padding:"4px 10px",textAlign:"right",fontFamily:"'Montserrat',sans-serif",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",color:"#059669"}}>{fmt(y.totalBenefit)}</td>))}<td style={{padding:"4px 10px",textAlign:"right",fontFamily:"'Montserrat',sans-serif",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",borderLeft:"2px solid #e2e8f0",color:"#059669"}}>{fmt(model.years.reduce((a,y)=>a+y.totalBenefit,0))}</td></tr>
                 <tr><td colSpan={model.years.length+2} style={{padding:"8px 10px 3px",fontWeight:800,fontSize:9,color:"#1e3a5f",textTransform:"uppercase",borderBottom:"1px solid #e2e8f0"}}>NET</td></tr>
-                {[{l:"Net Benefit",k:"net"},...(g.discountEnabled?[{l:"PV Net Benefit",k:"pvNet"}]:[])].map((row,i)=>{const total=model.years.reduce((a,y)=>a+y[row.k],0);return(<tr key={`n${i}`}><td style={{padding:"4px 10px",fontWeight:700,borderBottom:"1px solid #f1f5f9",fontSize:10}}>{row.l}</td>{model.years.map(y=>(<td key={y.year} style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",color:y[row.k]>=0?"#059669":"#dc2626"}}>{fmt(y[row.k])}</td>))}<td style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",borderLeft:"2px solid #e2e8f0",color:total>=0?"#059669":"#dc2626"}}>{fmt(total)}</td></tr>);})}
-                <tr style={{background:"#f0f9ff"}}><td style={{padding:"4px 10px",fontWeight:700,color:"#0369a1",borderBottom:"1px solid #f1f5f9",fontSize:10}}>Cumulative ROI</td>{model.years.map((y,i)=>{const cumCost=model.years.slice(0,i+1).reduce((a,yr)=>a+yr.totalCost,0);const cumBen=model.years.slice(0,i+1).reduce((a,yr)=>a+yr.totalBenefit,0);const cumRoi=cumCost>0?(cumBen-cumCost)/cumCost:0;return(<td key={y.year} style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",color:cumRoi>=0?"#0369a1":"#dc2626"}}>{pct(cumRoi)}</td>);})}<td style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",borderLeft:"2px solid #e2e8f0",color:model.roi>=0?"#0369a1":"#dc2626"}}>{pct(model.roi)}</td></tr>
-                <tr style={{background:"#f5f3ff"}}><td style={{padding:"4px 10px",fontWeight:700,color:"#7c3aed",borderBottom:"1px solid #f1f5f9",fontSize:10}}>Payback Period</td>{model.years.map((y,i)=>{const reached=model.pbm&&model.pbm<=(y.year*12);const thisYr=model.pbm&&model.pbm>(( y.year-1)*12)&&model.pbm<=(y.year*12);return(<td key={y.year} style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,fontWeight:thisYr?700:400,borderBottom:"1px solid #f1f5f9",color:thisYr?"#7c3aed":reached?"#a78bfa":"#94a3b8"}}>{thisYr?`Mo ${model.pbm} ✓`:reached?"achieved":"—"}</td>);})}<td style={{padding:"4px 10px",textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",borderLeft:"2px solid #e2e8f0",color:"#7c3aed"}}>{model.pbm?`${model.pbm} months`:"N/A"}</td></tr>
+                {[{l:"Net Benefit",k:"net"},...(g.discountEnabled?[{l:"PV Net Benefit",k:"pvNet"}]:[])].map((row,i)=>{const total=model.years.reduce((a,y)=>a+y[row.k],0);return(<tr key={`n${i}`}><td style={{padding:"4px 10px",fontWeight:700,borderBottom:"1px solid #f1f5f9",fontSize:10}}>{row.l}</td>{model.years.map(y=>(<td key={y.year} style={{padding:"4px 10px",textAlign:"right",fontFamily:"'Montserrat',sans-serif",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",color:y[row.k]>=0?"#059669":"#dc2626"}}>{fmt(y[row.k])}</td>))}<td style={{padding:"4px 10px",textAlign:"right",fontFamily:"'Montserrat',sans-serif",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",borderLeft:"2px solid #e2e8f0",color:total>=0?"#059669":"#dc2626"}}>{fmt(total)}</td></tr>);})}
+                <tr style={{background:"#f0f9ff"}}><td style={{padding:"4px 10px",fontWeight:700,color:"#0369a1",borderBottom:"1px solid #f1f5f9",fontSize:10}}>Cumulative ROI</td>{model.years.map((y,i)=>{const cumCost=model.years.slice(0,i+1).reduce((a,yr)=>a+yr.totalCost,0);const cumBen=model.years.slice(0,i+1).reduce((a,yr)=>a+yr.totalBenefit,0);const cumRoi=cumCost>0?(cumBen-cumCost)/cumCost:0;return(<td key={y.year} style={{padding:"4px 10px",textAlign:"right",fontFamily:"'Montserrat',sans-serif",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",color:cumRoi>=0?"#0369a1":"#dc2626"}}>{pct(cumRoi)}</td>);})}<td style={{padding:"4px 10px",textAlign:"right",fontFamily:"'Montserrat',sans-serif",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",borderLeft:"2px solid #e2e8f0",color:model.roi>=0?"#0369a1":"#dc2626"}}>{pct(model.roi)}</td></tr>
+                <tr style={{background:"#f5f3ff"}}><td style={{padding:"4px 10px",fontWeight:700,color:"#7c3aed",borderBottom:"1px solid #f1f5f9",fontSize:10}}>Payback Period</td>{model.years.map((y,i)=>{const reached=model.pbm&&model.pbm<=(y.year*12);const thisYr=model.pbm&&model.pbm>(( y.year-1)*12)&&model.pbm<=(y.year*12);return(<td key={y.year} style={{padding:"4px 10px",textAlign:"right",fontFamily:"'Montserrat',sans-serif",fontSize:10,fontWeight:thisYr?700:400,borderBottom:"1px solid #f1f5f9",color:thisYr?"#7c3aed":reached?"#a78bfa":"#94a3b8"}}>{thisYr?`Mo ${model.pbm} ✓`:reached?"achieved":"—"}</td>);})}<td style={{padding:"4px 10px",textAlign:"right",fontFamily:"'Montserrat',sans-serif",fontSize:10,fontWeight:700,borderBottom:"1px solid #f1f5f9",borderLeft:"2px solid #e2e8f0",color:"#7c3aed"}}>{model.pbm?`${model.pbm} months`:"N/A"}</td></tr>
               </tbody>
             </table></div>)}
 
@@ -2704,7 +2711,7 @@ function App(){
                 <div style={{fontSize:10,color:"#94a3b8"}}>{m.date} • {(m.d||[]).length} drivers • {m.g?.horizon||3}yr</div>
               </div>
               <button onClick={()=>loadModel(m)} style={{padding:"6px 12px",borderRadius:6,border:"none",background:"#3b82f6",color:"white",cursor:"pointer",fontSize:11,fontWeight:600}}>Load</button>
-              <button onClick={()=>{const url=generateShareURL(m.d||[],{...DEFAULT_GLOBALS,...(m.g||{})},m.k||[],m.r||{});if(url){navigator.clipboard.writeText(url).catch(()=>{});setToast("Link copied — send to prospect!");setShowModels(false);}else{setToast("Could not generate link.");}}} style={{padding:"6px 12px",borderRadius:6,border:"1px solid rgba(59,130,246,0.4)",background:"rgba(59,130,246,0.1)",color:"#3b82f6",cursor:"pointer",fontSize:11,fontWeight:600}}>Share</button>
+              <button onClick={()=>{const url=generateShareURL(m.d||[],{...DEFAULT_GLOBALS,...(m.g||{})},m.k||[],m.r||{},m.o||[]);if(url){navigator.clipboard.writeText(url).catch(()=>{});setToast("Link copied — send to prospect!");setShowModels(false);}else{setToast("Could not generate link.");}}} style={{padding:"6px 12px",borderRadius:6,border:"1px solid rgba(59,130,246,0.4)",background:"rgba(59,130,246,0.1)",color:"#3b82f6",cursor:"pointer",fontSize:11,fontWeight:600}}>Share</button>
               <button onClick={()=>{const data={...m};const blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"});const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=`Wrike_Model_${m.name}.json`;a.click();}} style={{padding:"6px 12px",borderRadius:6,border:"1px solid #cbd5e1",background:"white",cursor:"pointer",fontSize:11,fontWeight:600,color:"#475569"}}>Export</button>
               <button onClick={()=>deleteModel(i)} style={{border:"none",background:"none",cursor:"pointer",fontSize:14,color:"#dc2626"}}>×</button>
             </div>))}
@@ -2716,9 +2723,9 @@ function App(){
       {/* SHARE MODAL */}
       {shareModal&&<Modal onClose={()=>setShareModal(false)}>
         <div style={{fontSize:16,fontWeight:700,marginBottom:8}}>Share This Model</div>
-        <div style={{fontSize:11,color:"#64748b",marginBottom:12,lineHeight:1.5}}>Anyone who opens this link will see the model with all your current inputs, value drivers, and assumptions pre-loaded. They can adjust values but their changes won't affect your link.</div>
+        <div style={{fontSize:11,color:"#64748b",marginBottom:12,lineHeight:1.5}}>Anyone who opens this link will see the model with all your current inputs, value drivers, and assumptions pre-loaded. They can adjust values but their changes won't affect your link. <strong>Tip:</strong> Before building the next customer's model, click <strong>New model</strong> in the header so each shared link stays unique.</div>
         <div style={{position:"relative",marginBottom:12}}>
-          <textarea readOnly value={shareURL} style={{width:"100%",padding:"10px",border:"1px solid #cbd5e1",borderRadius:6,fontSize:10,fontFamily:"'JetBrains Mono',monospace",color:"#334155",background:"#f8fafc",outline:"none",resize:"none",height:70,boxSizing:"border-box"}} onClick={e=>e.target.select()}/>
+          <textarea readOnly value={shareURL} style={{width:"100%",padding:"10px",border:"1px solid #cbd5e1",borderRadius:6,fontSize:10,fontFamily:"'Montserrat',sans-serif",color:"#334155",background:"#f8fafc",outline:"none",resize:"none",height:70,boxSizing:"border-box"}} onClick={e=>e.target.select()}/>
         </div>
         <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
           <button onClick={()=>setShareModal(false)} style={{padding:"8px 14px",border:"1px solid #cbd5e1",borderRadius:6,background:"white",cursor:"pointer",fontSize:12,fontWeight:600,color:"#475569"}}>Close</button>
@@ -2727,9 +2734,9 @@ function App(){
       </Modal>}
       {editingDriver&&<EditDriverModal driver={editingDriver} onClose={()=>setEditingDriver(null)}
         onSave={upd=>{setDrivers(p=>p.map(d=>d.id===upd.id?upd:d));setEditingDriver(null);}}
-        onDelete={()=>{setDrivers(p=>p.filter(d=>d.id!==editingDriver.id));setEditingDriver(null);}}/>}
+        onDelete={()=>{setDrivers(p=>p.filter(d=>d.id!==editingDriver.id));setDisplayOrder(p=>p.filter(x=>!(x.type==="driver"&&x.id===editingDriver.id)));setEditingDriver(null);}}/>}
       {showLibrary&&<DriverLibraryModal existingIds={drivers.map(d=>d.id)} onClose={()=>setShowLibrary(false)}
-        onAdd={nd=>{setDrivers(p=>[...p,...nd]);const ns={};nd.forEach(d=>ns[d.id]=true);setOpenSections(p=>({...p,...ns}));setShowLibrary(false);}}/>}
+        onAdd={nd=>{setDrivers(p=>[...p,...nd]);setDisplayOrder(p=>insertDriversIntoDisplayOrder(p,nd));const ns={};nd.forEach(d=>ns[d.id]=true);setOpenSections(prev=>({...prev,...ns}));setShowLibrary(false);}}/>}
       {editingScenario&&<EditScenarioModal scenario={editingScenario} drivers={drivers} globals={g} onClose={()=>setEditingScenario(null)}
         onSave={upd=>{setScenarios(p=>p.map(s=>s.id===upd.id?upd:s));setEditingScenario(null);}}
         onDelete={()=>{setScenarios(p=>p.filter(s=>s.id!==editingScenario.id));setEditingScenario(null);}}/>}
